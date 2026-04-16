@@ -1,0 +1,30 @@
+{
+  "name": "iclaw-openclaw-proxy",
+  "version": "0.0.1",
+  "description": "Per-instance sidecar for OpenClaw: LLM reverse proxy, quota enforcement, IPv6→IPv4 webhook relay, and admin API.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/iClawAgent/iclaw-openclaw-proxy.git"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.12",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^2.0.0"
+  }
+}

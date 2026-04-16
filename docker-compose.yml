@@ -1,0 +1,45 @@
+services:
+  # OpenClaw gateway process — the AI agent runtime.
+  # The proxy shares this container's network namespace so that
+  # 127.0.0.1:8787 (webhook) and 127.0.0.1:18789 (RPC) resolve correctly.
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    restart: unless-stopped
+    volumes:
+      - openclaw-data:/data
+    environment:
+      OPENCLAW_STATE_DIR: /data
+    # Expose OpenClaw's own HTTP port for direct inspection if needed.
+    # Not required for normal proxy operation.
+    ports:
+      - "18789:18789"
+
+  # iclaw-openclaw-proxy — quota enforcement, LLM proxy, webhook relay, admin API.
+  # Joins OpenClaw's network namespace so loopback communication works.
+  proxy:
+    build: .
+    restart: unless-stopped
+    network_mode: "service:openclaw"
+    depends_on:
+      - openclaw
+    volumes:
+      - openclaw-data:/data
+    environment:
+      PORT: 8080
+      MEMBER_ID: ${MEMBER_ID}
+      SIDECAR_ADMIN_TOKEN: ${SIDECAR_ADMIN_TOKEN}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com}
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
+      OPENCLAW_STATE_DIR: /data
+      OPENCLAW_WEBHOOK_PORT: ${OPENCLAW_WEBHOOK_PORT:-8787}
+      GATEWAY_PORT: ${GATEWAY_PORT:-18789}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      SIDECAR_FALLBACK_DAILY_LIMIT: ${SIDECAR_FALLBACK_DAILY_LIMIT:--1}
+    # The proxy port is exposed via OpenClaw's network namespace.
+    # Add a dedicated port mapping here if you need direct host access:
+    # ports:
+    #   - "8080:8080"
+
+volumes:
+  openclaw-data:
