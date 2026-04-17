@@ -250,7 +250,7 @@ adminRouter.post("/admin/skills/dep-install", async (c) => {
 
 /**
  * Activate Codex OAuth: write auth-profiles.json for openai-codex provider,
- * set default model to openai-codex/gpt-5.1, then reload gateway config.
+ * set default model to openai-codex/gpt-5.4, then reload gateway config.
  * The openai provider stays on sidecar proxy (for API Key mode fallback).
  */
 adminRouter.post("/admin/activate-codex-oauth", async (c) => {

@@ -107,7 +107,13 @@ function extractAccountIdFromJwt(token: string): string | null {
     const payload = JSON.parse(
       Buffer.from(parts[1], "base64url").toString(),
     );
-    return payload.account_id ?? payload.sub ?? null;
+    const authClaim = payload["https://api.openai.com/auth"];
+    return (
+      authClaim?.chatgpt_account_id ??
+      payload.account_id ??
+      payload.sub ??
+      null
+    );
   } catch {
     return null;
   }
@@ -200,7 +206,7 @@ function writeJsonFile(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-export const CODEX_OAUTH_DEFAULT_MODEL = "openai-codex/gpt-5.1";
+export const CODEX_OAUTH_DEFAULT_MODEL = "openai-codex/gpt-5.4";
 
 // ---------------------------------------------------------------------------
 // Token refresh (Sidecar-local, kept for backward compat / status reporting)
@@ -233,11 +239,9 @@ async function doRefresh(refreshToken: string): Promise<void> {
       expires_in: number;
     };
 
-    storeTokens(
-      data.access_token,
-      data.refresh_token ?? refreshToken,
-      data.expires_in,
-    );
+    const nextRefresh = data.refresh_token ?? refreshToken;
+    storeTokens(data.access_token, nextRefresh, data.expires_in);
+    writeAuthProfiles(data.access_token, nextRefresh, data.expires_in);
     console.log("[codex-oauth] Token refreshed successfully");
   } catch (err) {
     console.error("[codex-oauth] Refresh error:", err);
