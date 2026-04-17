@@ -10,8 +10,13 @@ vi.mock("../services/quota.js", () => ({
 
 vi.mock("../env.js", () => ({
   getLlmApiKey: () => "sk-real-key",
+  getLlmAuthMode: () => "platform",
   getLlmBaseUrl: () => "https://api.openai.com",
   getLlmProvider: () => "openai",
+}));
+
+vi.mock("../services/codex-forwarder.js", () => ({
+  forwardToCodex: vi.fn(),
 }));
 
 const { proxyRouter } = await import("../routes/proxy.js");

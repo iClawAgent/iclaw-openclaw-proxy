@@ -2,10 +2,12 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import {
   getLlmApiKey,
+  getLlmAuthMode,
   getLlmBaseUrl,
   getLlmProvider,
 } from "../env.js";
 import { checkSidecarQuota } from "../services/quota.js";
+import { forwardToCodex } from "../services/codex-forwarder.js";
 
 export const proxyRouter = new Hono();
 
@@ -38,11 +40,16 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
 proxyRouter.all("/v1/*", (c) => forwardToUpstream(c));
 
 // ---------------------------------------------------------------------------
-// Upstream forwarder — injects real LLM API key, streams response back.
-// Only used for API Key mode. Codex OAuth uses OpenClaw native auth directly.
+// Upstream forwarder — routes to the correct backend based on auth mode.
+//   platform    → injects API key, forwards to LLM_BASE_URL/v1/*
+//   codex_oauth → translates to Codex Responses API, forwards to chatgpt.com
 // ---------------------------------------------------------------------------
 
 async function forwardToUpstream(c: Context): Promise<Response> {
+  if (getLlmAuthMode() === "codex_oauth") {
+    return forwardToCodex(c.req.raw.body);
+  }
+
   const reqPath = c.req.path;
   const target = new URL(reqPath, getLlmBaseUrl());
   target.search = new URL(c.req.url).search;

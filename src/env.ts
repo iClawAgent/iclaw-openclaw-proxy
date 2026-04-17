@@ -15,6 +15,7 @@ let memberId: string;
 let sidecarAdminToken: string;
 let llmAuthMode: string = "platform";
 let codexOAuthAccessToken: string | null = null;
+let codexAccountId: string | null = null;
 
 export function validateEnv(): void {
   llmAuthMode = process.env.LLM_AUTH_MODE ?? "platform";
@@ -69,6 +70,14 @@ export function getCodexOAuthToken(): string | null {
 
 export function setCodexOAuthAccessToken(token: string | null): void {
   codexOAuthAccessToken = token;
+}
+
+export function getCodexAccountId(): string | null {
+  return codexAccountId;
+}
+
+export function setCodexAccountId(id: string | null): void {
+  codexAccountId = id;
 }
 
 export function getCodexOAuthStatus(): CodexOAuthStatus {

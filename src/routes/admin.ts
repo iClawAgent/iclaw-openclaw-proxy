@@ -249,9 +249,14 @@ adminRouter.post("/admin/skills/dep-install", async (c) => {
 // ---------------------------------------------------------------------------
 
 /**
- * Activate Codex OAuth: write auth-profiles.json for openai-codex provider,
- * set default model to openai-codex/gpt-5.1, then reload gateway config.
- * The openai provider stays on sidecar proxy (for API Key mode fallback).
+ * Activate Codex OAuth: store tokens in sidecar memory for proxy-based
+ * forwarding, set default model to openai/gpt-5.1 so OpenClaw routes LLM
+ * traffic through the proxy, then reload gateway config.
+ *
+ * The proxy detects codex_oauth auth mode and translates Chat Completions
+ * requests to the Codex Responses API (chatgpt.com/backend-api/codex/responses).
+ * Auth-profiles.json is still written as a fallback for OpenClaw's native
+ * openai-codex provider.
  */
 adminRouter.post("/admin/activate-codex-oauth", async (c) => {
   const { accessToken, refreshToken, expiresIn } = await c.req.json<{
@@ -283,14 +288,14 @@ adminRouter.post("/admin/activate-codex-oauth", async (c) => {
     );
   }
 
-  console.log("[sidecar] Codex OAuth activated (openai-codex provider)");
+  console.log("[sidecar] Codex OAuth activated (proxy-forwarded to Codex Responses API)");
   return c.json({ ok: true });
 });
 
 /**
- * Deactivate Codex OAuth: clear openai-codex auth profiles, restore default
- * model, then reload gateway config. The openai provider is untouched
- * (it was never modified — always on sidecar proxy).
+ * Deactivate Codex OAuth: clear tokens from sidecar memory and openai-codex
+ * auth profiles, restore default model, then reload gateway config.
+ * The proxy falls back to API Key mode (platform auth).
  */
 adminRouter.post("/admin/deactivate-codex-oauth", async (c) => {
   const body = await c.req.json<{ restoreModel?: string }>().catch(() => ({} as { restoreModel?: string }));
@@ -311,7 +316,7 @@ adminRouter.post("/admin/deactivate-codex-oauth", async (c) => {
     );
   }
 
-  console.log("[sidecar] Codex OAuth deactivated (openai-codex profiles cleared)");
+  console.log("[sidecar] Codex OAuth deactivated (proxy reverted to platform auth)");
   return c.json({ ok: true });
 });
 

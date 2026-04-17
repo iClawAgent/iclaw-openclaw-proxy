@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { setCodexOAuthAccessToken, setLlmAuthMode } from "../env.js";
+import { setCodexOAuthAccessToken, setCodexAccountId, setLlmAuthMode } from "../env.js";
 
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
 
@@ -49,6 +49,8 @@ export function loadPersistedTokens(): PersistedTokens | null {
       return null;
     }
 
+    const accountId = extractAccountIdFromJwt(data.accessToken);
+    setCodexAccountId(accountId);
     scheduleRefreshFromExpiry(data.refreshToken, data.expiresAt);
     return data;
   } catch {
@@ -63,13 +65,16 @@ export function storeTokens(
 ): void {
   const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   setCodexOAuthAccessToken(accessToken);
+  const accountId = extractAccountIdFromJwt(accessToken);
+  setCodexAccountId(accountId);
   persistTokens({ accessToken, refreshToken, expiresAt });
   scheduleRefreshFromExpiry(refreshToken, expiresAt);
-  console.log(`[codex-oauth] Tokens stored, expires at ${expiresAt}`);
+  console.log(`[codex-oauth] Tokens stored, expires at ${expiresAt}, accountId=${accountId ?? "unknown"}`);
 }
 
 export function clearTokens(): void {
   setCodexOAuthAccessToken(null);
+  setCodexAccountId(null);
   setLlmAuthMode("platform");
   if (refreshTimer) {
     clearTimeout(refreshTimer);
@@ -107,6 +112,10 @@ function extractAccountIdFromJwt(token: string): string | null {
     const payload = JSON.parse(
       Buffer.from(parts[1], "base64url").toString(),
     );
+    // Primary: OpenAI Codex JWT stores account ID at this claim path
+    const auth = payload["https://api.openai.com/auth"];
+    if (auth?.chatgpt_account_id) return auth.chatgpt_account_id;
+    // Fallback claims
     return payload.account_id ?? payload.sub ?? null;
   } catch {
     return null;
@@ -200,7 +209,17 @@ function writeJsonFile(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-export const CODEX_OAUTH_DEFAULT_MODEL = "openai-codex/gpt-5.1";
+/**
+ * Default model set when Codex OAuth is activated.
+ *
+ * Uses the `openai` provider prefix so OpenClaw routes through the sidecar
+ * proxy at /v1/chat/completions. The proxy detects codex_oauth auth mode and
+ * translates + forwards to the Codex Responses API automatically.
+ *
+ * Previously this was "openai-codex/gpt-5.1" which used OpenClaw's native
+ * openai-codex provider (bypassing the proxy entirely).
+ */
+export const CODEX_OAUTH_DEFAULT_MODEL = "openai/gpt-5.1";
 
 // ---------------------------------------------------------------------------
 // Token refresh (Sidecar-local, kept for backward compat / status reporting)
