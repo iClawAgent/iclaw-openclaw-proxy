@@ -73,7 +73,8 @@ export function setCodexOAuthAccessToken(token: string | null): void {
 
 export function getCodexOAuthStatus(): CodexOAuthStatus {
   return {
-    connected: codexOAuthAccessToken !== null,
+    connected:
+      codexOAuthAccessToken !== null && llmAuthMode === "codex_oauth",
     authMode: llmAuthMode,
   };
 }
