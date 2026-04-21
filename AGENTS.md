@@ -7,7 +7,7 @@
 The `iclaw-openclaw` image is a **two-layer composite** published to GitHub Container Registry:
 
 1. **Base layer** - upstream OpenClaw from GHCR (`ghcr.io/openclaw/openclaw:<version>`)
-2. **Sidecar layer** - Bun + pnpm + `@iclawagent/sidecar` + `@iclawagent/shared`
+2. **Sidecar layer** - Bun + pnpm + `@iclawagent/iclaw-openclaw-proxy` (sidecar)
 
 Build file: `iclawagent-app/Dockerfile.openclaw-sidecar`
 Registry: `ghcr.io/iclawagent/iclaw-openclaw`
@@ -28,7 +28,6 @@ Full example: `ghcr.io/iclawagent/iclaw-openclaw:oc.0324.sidecar.0329`
 
 - Docker-compatible builder available locally
 - GHCR authentication with a GitHub Username and PAT that has `write:packages` and `read:packages`
-- Sidecar monorepo deps installed (`pnpm install` in `iclawagent-app/`)
 
 **AGENT INSTRUCTION:** Before attempting any `docker` operation that pushes to GHCR, ask the user to provide their GitHub Username and PAT.
 
@@ -124,7 +123,7 @@ Use the same Backoffice UI or orchestrator upgrade flow with the previous GHCR i
   },
   "channels": {
     "telegram": {
-      "webhookHost": "::",    // MUST be :: for Fly 6PN (not 0.0.0.0)
+      "webhookHost": "::",
       "webhookPort": 8787,
       "webhookPath": "/telegram-webhook"
     }
