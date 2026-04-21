@@ -14,23 +14,41 @@
 
 ## Architecture
 
+The sidecar's core role is to be the LLM credential boundary for OpenClaw. OpenClaw is configured to send all LLM requests to the sidecar (`OPENCLAW_LLM_BASE_URL=http://localhost:8080/v1`); the sidecar holds the real API key in memory, enforces quota, and forwards to the upstream provider.
+
 ```
-Telegram API
-    │  HTTPS POST
-    ▼
-Gatekeeper (public ingress)
-    │  IPv6
+OpenClaw Gateway :8787 (IPv4 loopback)
+    │  POST /v1/chat/completions
+    │  (no auth header — OpenClaw never sees the real key)
     ▼
 iclaw-openclaw-proxy :8080        ← this package
-    │
-    ├─ /v1/*  ────────────────────────────────► LLM upstream
-    │           quota check + API key inject      (OpenAI / Anthropic / …)
-    │
-    ├─ /admin/*  ◄──── Orchestrator (IPv6)
-    │                  X-Admin-Token required
-    │
-    └─ /* relay ──► OpenClaw Gateway :8787 (IPv4 loopback)
-                    └─► OpenClaw agent process
+    │  quota check
+    │  strip incoming auth headers
+    │  inject real LLM_API_KEY from memory
+    ▼
+LLM upstream
+    (OpenAI / Anthropic / Google / DeepSeek / Ollama / …)
+```
+
+Two secondary responsibilities run on the same port:
+
+```
+Orchestrator (IPv6)
+    │  POST /admin/*  (X-Admin-Token required)
+    ▼
+iclaw-openclaw-proxy :8080
+    │  rotate-key · quota-sync · config-patch
+    │  skills · workspace · backup/restore
+    ▼
+OpenClaw Gateway (RPC :18789 or process signal)
+
+Gatekeeper (public ingress, IPv6)
+    │  Telegram webhook relay
+    ▼
+iclaw-openclaw-proxy :8080
+    │  /* relay (IPv6 → IPv4 loopback bridge)
+    ▼
+OpenClaw Gateway :8787
 ```
 
 In production each user gets a dedicated container running `iclaw-openclaw` — a composite Docker image that layers this proxy on top of the upstream OpenClaw image. Because both processes share the same machine's loopback interface, all internal communication stays on `127.0.0.1` and never crosses the network.
