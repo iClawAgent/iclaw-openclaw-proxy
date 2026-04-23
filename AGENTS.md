@@ -96,7 +96,7 @@ Use the Backoffice Instances page to confirm the target image is applied and the
 
 If direct instance access is available, verify:
 - OpenClaw version: `node openclaw.mjs --version`
-- Skills install path works with `OPENCLAW_STATE_DIR=/data`
+- Skills install path works: installed skill appears under `/data/skills/<slug>/SKILL.md` (canonical path). `$HOME/.openclaw` must be a symlink pointing to `/data`; verify with `ls -la /root/.openclaw`.
 - Gateway health responds at `http://localhost:18789/health`
 
 ## Rollback

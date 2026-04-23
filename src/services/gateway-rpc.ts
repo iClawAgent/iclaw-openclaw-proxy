@@ -16,7 +16,21 @@ const OPENCLAW_BIN = "openclaw";
 const CMD_TIMEOUT_MS = 35_000;
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
 const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "18789";
-const CONFIG_PATH = `${STATE_DIR}/openclaw.json`;
+// CONFIG_PATH: prefer explicit env (belt), fall back to state-dir derivation (suspenders)
+const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? `${STATE_DIR}/openclaw.json`;
+
+/**
+ * Build the env object for every OpenClaw CLI execFileAsync call.
+ * Passes both OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH so the CLI
+ * sees the correct state root even if $HOME drifts (belt-and-suspenders).
+ */
+function openclawExecEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    OPENCLAW_STATE_DIR: STATE_DIR,
+    OPENCLAW_CONFIG_PATH: CONFIG_PATH,
+  };
+}
 
 /**
  * Read the gateway auth token from the openclaw config file.
@@ -62,17 +76,12 @@ export async function relayConfigPatch(
     throw new Error("No gateway token: config file, OPENCLAW_GATEWAY_TOKEN env, and gatewayToken param all empty");
   }
 
-  const env = {
-    ...process.env,
-    OPENCLAW_STATE_DIR: STATE_DIR,
-  };
-
   const baseArgs = ["--url", wsUrl, "--token", token, "--json", "--timeout", String(CMD_TIMEOUT_MS)];
 
   const getResult = await execFileAsync(
     OPENCLAW_BIN,
     ["gateway", "call", "config.get", ...baseArgs],
-    { timeout: CMD_TIMEOUT_MS + 5_000, env },
+    { timeout: CMD_TIMEOUT_MS + 5_000, env: openclawExecEnv() },
   );
 
   const configData = JSON.parse(getResult.stdout);
@@ -87,7 +96,7 @@ export async function relayConfigPatch(
   const patchResult = await execFileAsync(
     OPENCLAW_BIN,
     ["gateway", "call", "config.patch", "--params", params, ...baseArgs],
-    { timeout: CMD_TIMEOUT_MS + 5_000, env },
+    { timeout: CMD_TIMEOUT_MS + 5_000, env: openclawExecEnv() },
   );
 
   return JSON.parse(patchResult.stdout);
@@ -108,19 +117,37 @@ const SKILL_INSTALL_TIMEOUT_MS = 120_000;
 export async function installSkillFromClawHub(
   slug: string,
 ): Promise<SkillContentInstallResponse> {
-  const env = {
-    ...process.env,
-    OPENCLAW_STATE_DIR: STATE_DIR,
-  };
+  // Symlink safety check: $HOME/.openclaw must resolve to STATE_DIR before
+  // invoking the CLI. If the symlink is missing (e.g. openclaw init wiped it),
+  // the CLI may write to the wrong location. Bootstrap recreates it on next
+  // restart; within a session we fail fast instead of silently misrouting data.
+  const homeOpenClaw = path.join(process.env.HOME ?? "/root", ".openclaw");
+  try {
+    const real = await fs.realpath(homeOpenClaw);
+    if (path.resolve(real) !== path.resolve(STATE_DIR)) {
+      throw new Error(
+        `symlink_missing: $HOME/.openclaw resolves to ${real}, expected ${STATE_DIR}`,
+      );
+    }
+  } catch (checkErr: unknown) {
+    const msg = (checkErr as Error).message ?? String(checkErr);
+    if (msg.startsWith("symlink_missing:")) throw checkErr as Error;
+    // Path does not exist at all — bootstrap omission; treat same as missing
+    throw new Error(`symlink_missing: ${homeOpenClaw} does not exist or is unreachable: ${msg}`);
+  }
+
   try {
     const result = await execFileAsync(
       OPENCLAW_BIN,
       ["skills", "install", "--", slug],
-      { timeout: SKILL_INSTALL_TIMEOUT_MS, env },
+      { timeout: SKILL_INSTALL_TIMEOUT_MS, env: openclawExecEnv() },
     );
 
-    // CLI installs to $HOME/.openclaw/workspace/skills/<slug> which differs
-    // from the Gateway state dir (/data/skills/<slug>).  Copy when needed.
+    // Canonical skill path is /data/skills/<slug> (OQ2/OQ3 unverified; see
+    // bootstrap-cmd.ts TODO). With the symlink in place, $HOME/.openclaw/...
+    // writes resolve into /data/..., so the homeSrc path is actually inside
+    // STATE_DIR already. We guard against deleting through the symlink into
+    // the canonical tree by checking realpath equality before any removal.
     const homeSrc = path.join(
       process.env.HOME ?? "/root",
       ".openclaw",
@@ -128,16 +155,21 @@ export async function installSkillFromClawHub(
       "skills",
       slug,
     );
-    const gatewayDst = path.join(STATE_DIR, "skills", slug);
+    const canonicalDst = path.join(STATE_DIR, "skills", slug);
 
-    if (path.resolve(homeSrc) !== path.resolve(gatewayDst)) {
+    // Only perform copy+remove if the paths are distinct in the real filesystem
+    const homeSrcReal = await fs.realpath(path.dirname(homeSrc)).catch(() => null);
+    const canonicalDstReal = path.resolve(canonicalDst);
+    const homeSrcResolved = homeSrcReal ? path.join(homeSrcReal, slug) : null;
+
+    if (homeSrcResolved && homeSrcResolved !== canonicalDstReal) {
       try {
         await fs.stat(homeSrc);
-        await fs.mkdir(path.dirname(gatewayDst), { recursive: true });
-        await fs.cp(homeSrc, gatewayDst, { recursive: true, force: true });
+        await fs.mkdir(path.dirname(canonicalDst), { recursive: true });
+        await fs.cp(homeSrc, canonicalDst, { recursive: true, force: true });
         await fs.rm(homeSrc, { recursive: true, force: true });
       } catch {
-        // best-effort; if the CLI wrote directly to stateDir, this is a no-op
+        // best-effort; if the CLI wrote directly to STATE_DIR, this is a no-op
       }
     }
 
@@ -147,6 +179,8 @@ export async function installSkillFromClawHub(
       method: "cli_install",
     };
   } catch (err: unknown) {
+    const msg = (err as Error).message ?? "";
+    if (msg.startsWith("symlink_missing:")) throw err as Error;
     const stderr = (err as { stderr?: string }).stderr?.trim() ?? "";
     throw new Error(stderr || "skills_install_failed");
   }
@@ -161,16 +195,20 @@ export async function removeSkillFromWorkspace(
 ): Promise<SkillContentRemoveResponse> {
   const stateDir = STATE_DIR;
 
-  // Remove from Gateway skill dir (/data/skills/<slug>)
-  const gatewayDir = path.join(stateDir, "skills", slug);
-  const resolvedGw = path.resolve(gatewayDir);
-  const allowedGw = path.resolve(stateDir, "skills");
-  if (!resolvedGw.startsWith(allowedGw + "/")) {
+  // Remove from canonical skill dir (/data/skills/<slug>)
+  const canonicalDir = path.join(stateDir, "skills", slug);
+  const resolvedCanonical = path.resolve(canonicalDir);
+  const allowedSkills = path.resolve(stateDir, "skills");
+  if (!resolvedCanonical.startsWith(allowedSkills + "/")) {
     throw new Error("invalid_skill_path: path traversal detected");
   }
-  await fs.rm(resolvedGw, { recursive: true, force: true });
+  await fs.rm(resolvedCanonical, { recursive: true, force: true });
 
-  // Also clean up CLI cache dir if it exists
+  // Only remove the $HOME/.openclaw path if it resolves to a different real
+  // location (i.e. the symlink is absent or points elsewhere). With the
+  // $HOME/.openclaw -> /data symlink in place, both paths resolve to the same
+  // canonical tree and a second rm would be a harmless no-op — but we guard
+  // explicitly to avoid double-deleting through a future symlink change.
   const homeDir = path.join(
     process.env.HOME ?? "/root",
     ".openclaw",
@@ -178,9 +216,11 @@ export async function removeSkillFromWorkspace(
     "skills",
     slug,
   );
-  const resolvedHome = path.resolve(homeDir);
-  if (resolvedHome !== resolvedGw) {
-    await fs.rm(resolvedHome, { recursive: true, force: true });
+  const homeParentReal = await fs.realpath(path.dirname(homeDir)).catch(() => null);
+  const homeResolved = homeParentReal ? path.join(homeParentReal, slug) : null;
+
+  if (homeResolved && homeResolved !== resolvedCanonical) {
+    await fs.rm(homeDir, { recursive: true, force: true });
   }
 
   return { ok: true, message: `Skill "${slug}" removed` };
@@ -206,10 +246,7 @@ function buildGatewayBaseArgs(timeoutMs: number): string[] {
   ];
 }
 
-const gatewayEnv = () => ({
-  ...process.env,
-  OPENCLAW_STATE_DIR: STATE_DIR,
-});
+const gatewayEnv = openclawExecEnv;
 
 export async function getSkillsStatus(): Promise<SkillStatusResponse> {
   const timeout = CMD_TIMEOUT_MS;

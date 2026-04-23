@@ -15,7 +15,8 @@ import type {
 } from "../contracts.js";
 
 const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
-const CONFIG_PATH = `${STATE_DIR}/openclaw.json`;
+// CONFIG_PATH: prefer explicit env (belt), fall back to state-dir derivation (suspenders)
+const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? `${STATE_DIR}/openclaw.json`;
 const MAX_DISPLAY_BYTES = 512 * 1024; // 512 KB
 const MAX_WRITE_BYTES = 2 * 1024 * 1024; // 2 MiB
 
