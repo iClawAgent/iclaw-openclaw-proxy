@@ -4,6 +4,7 @@ import { validateEnv, getSidecarAdminToken } from "./env.js";
 import { adminAuth } from "./middleware/admin-auth.js";
 import { proxyRouter } from "./routes/proxy.js";
 import { adminRouter } from "./routes/admin.js";
+import { internalRouter } from "./routes/internal.js";
 
 validateEnv();
 
@@ -18,6 +19,9 @@ app.get("/health", (c) => {
 // Admin API — protected by X-Admin-Token (Orchestrator via IPv6)
 app.use("/admin/*", adminAuth(getSidecarAdminToken()));
 app.route("/", adminRouter);
+
+// Internal API — no adminAuth; self-authenticated via token exchange
+app.route("/", internalRouter);
 
 // LLM Reverse Proxy — /v1/* (OpenClaw process on same machine)
 app.route("/", proxyRouter);

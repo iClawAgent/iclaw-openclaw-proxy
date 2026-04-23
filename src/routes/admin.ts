@@ -1,6 +1,8 @@
 import { Hono } from "hono";
-import type { SidecarBackupRequest, SidecarRestoreRequest } from "../backup-contract.js";
-
+import type {
+  SidecarBackupRequest,
+  SidecarRestoreRequest,
+} from "../backup-contract.js";
 import {
   setLlmCredentials,
   setLlmAuthMode,
@@ -42,6 +44,7 @@ import {
   writeOpenclawConfig,
   getGatewayStatus,
 } from "../services/workspace-files.js";
+import { setupBirdSkill, redactBirdSecrets, type BirdSetupRequest, type BirdSetupResponse } from "../services/bird-skill.js";
 
 export const adminRouter = new Hono();
 
@@ -558,5 +561,30 @@ adminRouter.post("/admin/restore", async (c) => {
     const message = err instanceof Error ? err.message : "restore_failed";
     console.error("[sidecar] restore failed:", message);
     return c.json({ error: message }, 502);
+  }
+});
+
+// ─── POST /admin/skills/bird/setup — Setup bird skill ──────────────────────
+
+adminRouter.post("/admin/skills/bird/setup", async (c) => {
+  const body = await c.req.json<BirdSetupRequest>();
+  if (!body.authMode || !body.authToken || !body.ct0) {
+    return c.json(
+      { error: "authMode, authToken, and ct0 are required" },
+      400,
+    );
+  }
+  if (body.authMode !== "cookies") {
+    return c.json({ error: "unsupported_auth_mode" }, 400);
+  }
+
+  try {
+    const result = await setupBirdSkill(body);
+    const redacted = redactBirdSecrets(result) as BirdSetupResponse;
+    return c.json(redacted);
+  } catch (err) {
+    // Log with redaction; return structured error code, never raw message.
+    console.error("[sidecar] bird setup failed:", redactBirdSecrets({ error: err instanceof Error ? err.message : "unknown" }));
+    return c.json({ error: "bird_setup_failed" }, 502);
   }
 });
