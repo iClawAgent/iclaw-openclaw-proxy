@@ -7,28 +7,28 @@ export const internalRouter = new Hono();
 //
 // No adminAuth middleware — self-authenticated via the one-time token exchange.
 // The sidecar proves its identity by passing its own SIDECAR_ADMIN_TOKEN when
-// calling back to orchestrator, which validates it against the stored value.
+// calling back to portal-api, which validates it against the Redis-stored value.
 //
-// SSRF guard: ORCHESTRATOR_BASE_URL must be set (fail closed). Requests with a
-// mismatched orchestratorBaseUrl are rejected unconditionally so the sidecar cannot
+// SSRF guard: TOKEN_CALLBACK_BASE_URL must be set (fail closed). Requests with a
+// mismatched tokenCallbackBaseUrl are rejected unconditionally so the sidecar cannot
 // be coerced into POSTing SIDECAR_ADMIN_TOKEN to an attacker-controlled host.
 
 internalRouter.post("/internal/skills/bird/setup-by-token", async (c) => {
-  const body = await c.req.json<{ token: string; instanceId: string; orchestratorBaseUrl: string }>();
-  if (!body.token || !body.instanceId || !body.orchestratorBaseUrl) {
-    return c.json({ error: "token, instanceId, and orchestratorBaseUrl are required" }, 400);
+  const body = await c.req.json<{ token: string; instanceId: string; tokenCallbackBaseUrl: string }>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
   }
 
-  // Fail closed: ORCHESTRATOR_BASE_URL must be provisioned in the sidecar env.
+  // Fail closed: TOKEN_CALLBACK_BASE_URL must be provisioned in the sidecar env.
   // Without it we cannot validate the callback URL and must refuse.
-  const expectedBase = process.env.ORCHESTRATOR_BASE_URL;
+  const expectedBase = process.env.TOKEN_CALLBACK_BASE_URL;
   if (!expectedBase) {
-    console.error("[sidecar] setup-by-token: ORCHESTRATOR_BASE_URL not configured (fail closed)");
-    return c.json({ error: "orchestrator_url_not_configured" }, 503);
+    console.error("[sidecar] setup-by-token: TOKEN_CALLBACK_BASE_URL not configured (fail closed)");
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
   }
-  if (body.orchestratorBaseUrl !== expectedBase) {
-    console.error("[sidecar] setup-by-token: orchestratorBaseUrl mismatch (SSRF guard)");
-    return c.json({ error: "invalid_orchestrator_url" }, 403);
+  if (body.tokenCallbackBaseUrl !== expectedBase) {
+    console.error("[sidecar] setup-by-token: tokenCallbackBaseUrl mismatch (SSRF guard)");
+    return c.json({ error: "invalid_token_callback_url" }, 403);
   }
 
   const sidecarAdminToken = process.env.SIDECAR_ADMIN_TOKEN ?? "";
@@ -36,7 +36,7 @@ internalRouter.post("/internal/skills/bird/setup-by-token", async (c) => {
   let authToken: string;
   let ct0: string;
   try {
-    const url = `${body.orchestratorBaseUrl}/internal/bird-setup-token/${encodeURIComponent(body.token)}?instanceId=${encodeURIComponent(body.instanceId)}`;
+    const url = `${body.tokenCallbackBaseUrl}/sidecar/skills/bird/setup-token/${encodeURIComponent(body.token)}?instanceId=${encodeURIComponent(body.instanceId)}`;
     const credResponse = await fetch(url, {
       headers: { "X-Sidecar-Admin-Token": sidecarAdminToken },
     });

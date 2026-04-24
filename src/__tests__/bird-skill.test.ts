@@ -147,6 +147,12 @@ describe("bird-skill service", () => {
     const AUTH_TOKEN = "super-secret-auth-token-xyz";
     const CT0 = "super-secret-ct0-abc";
 
+    beforeEach(() => {
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+    });
+
     function setupSuccessMocks() {
       mockInstallSkill.mockResolvedValue(undefined);
       mockUpdateSkill.mockResolvedValue(undefined);
@@ -175,6 +181,12 @@ describe("bird-skill service", () => {
     const AUTH_TOKEN = "env-inject-auth-token";
     const CT0 = "env-inject-ct0";
 
+    beforeEach(() => {
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+    });
+
     it("bird whoami is invoked with AUTH_TOKEN and CT0 in env, not in argv", async () => {
       mockInstallSkill.mockResolvedValue(undefined);
       mockUpdateSkill.mockResolvedValue(undefined);
@@ -198,6 +210,12 @@ describe("bird-skill service", () => {
   // ─── PATH propagation ─────────────────────────────────────────────────────
 
   describe("PATH propagation", () => {
+    beforeEach(() => {
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+    });
+
     it("updateSkill is called with PATH env including /data/.iclaw/bin", async () => {
       mockInstallSkill.mockResolvedValue(undefined);
       mockUpdateSkill.mockResolvedValue(undefined);
