@@ -33,6 +33,8 @@ const execFileAsync = promisify(execFile);
 export const BIRD_BIN_PATH = "/data/.iclaw/bin/bird";
 export const BIRD_INSTALL_PREFIX = "/data/.iclaw";
 export const BIRD_CREDENTIALS_PATH = "/data/.iclaw/skills/bird/credentials.json";
+export const BIRD_CLAWHUB_SLUG = "bird-twitter";
+export const BIRD_SKILL_MD_PATH = `/data/skills/${BIRD_CLAWHUB_SLUG}/SKILL.md`;
 
 // ─── Secret Redaction ──────────────────────────────────────────────────────
 
@@ -134,6 +136,17 @@ export async function readBirdCredentials(): Promise<{
     throw new Error(
       `Failed to read bird credentials: ${err instanceof Error ? err.message : "unknown"}`,
     );
+  }
+}
+
+async function verifyBirdSkillContent(): Promise<void> {
+  try {
+    const stat = await fs.stat(BIRD_SKILL_MD_PATH);
+    if (!stat.isFile()) {
+      throw new Error("bird_skill_content_missing");
+    }
+  } catch {
+    throw new Error("bird_skill_content_missing");
   }
 }
 
@@ -250,16 +263,12 @@ export async function setupBirdSkill(
       throw new Error("Both authToken and ct0 are required for cookies mode");
     }
 
-    // 2. Install skill content if not already installed
-    let installedSkill = false;
-    try {
-      console.log("[sidecar] Installing bird skill content...");
-      await installSkillFromClawHub("bird");
-      installedSkill = true;
-    } catch (err) {
-      // Skill may already be installed; proceed if dependency and credentials work
-      console.warn("[sidecar] Skill content install skipped:", err);
-    }
+    // 2. Install skill content. This is mandatory: without SKILL.md, OpenClaw
+    // cannot list or use the skill even if the binary and credentials work.
+    console.log("[sidecar] Installing bird skill content...");
+    await installSkillFromClawHub(BIRD_CLAWHUB_SLUG);
+    await verifyBirdSkillContent();
+    const installedSkill = true;
 
     // 3. Check if bird binary exists; install dependency if missing
     let installedDependency = false;
@@ -282,7 +291,7 @@ export async function setupBirdSkill(
     //    can resolve the bird binary at the same deterministic path the sidecar uses.
     console.log("[sidecar] Enabling bird skill...");
     await updateSkill({
-      skillKey: "bird",
+      skillKey: BIRD_CLAWHUB_SLUG,
       enabled: true,
       env: { PATH: `/data/.iclaw/bin:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}` },
     });

@@ -9,6 +9,8 @@ import {
   BIRD_BIN_PATH,
   BIRD_INSTALL_PREFIX,
   BIRD_CREDENTIALS_PATH,
+  BIRD_CLAWHUB_SLUG,
+  BIRD_SKILL_MD_PATH,
   type BirdSetupRequest,
 } from "../services/bird-skill.js";
 
@@ -90,6 +92,14 @@ describe("bird-skill service", () => {
       expect(BIRD_CREDENTIALS_PATH).toBe("/data/.iclaw/skills/bird/credentials.json");
     });
 
+    it("BIRD_CLAWHUB_SLUG is the OpenClaw ClawHub slug", () => {
+      expect(BIRD_CLAWHUB_SLUG).toBe("bird-twitter");
+    });
+
+    it("BIRD_SKILL_MD_PATH is /data/skills/bird-twitter/SKILL.md", () => {
+      expect(BIRD_SKILL_MD_PATH).toBe("/data/skills/bird-twitter/SKILL.md");
+    });
+
     it("BIRD_BIN_PATH starts with / (absolute path)", () => {
       expect(BIRD_BIN_PATH.startsWith("/")).toBe(true);
     });
@@ -151,6 +161,7 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
     });
 
     function setupSuccessMocks() {
@@ -185,6 +196,7 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
     });
 
     it("bird whoami is invoked with AUTH_TOKEN and CT0 in env, not in argv", async () => {
@@ -214,6 +226,7 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
     });
 
     it("updateSkill is called with PATH env including /data/.iclaw/bin", async () => {
@@ -225,10 +238,33 @@ describe("bird-skill service", () => {
 
       await setupBirdSkill({ slug: "bird", authMode: "cookies", authToken: "tok", ct0: "ct0" });
 
+      expect(mockInstallSkill).toHaveBeenCalledWith("bird-twitter");
       expect(mockUpdateSkill).toHaveBeenCalledOnce();
       const updateArg = mockUpdateSkill.mock.calls[0][0];
+      expect(updateArg.skillKey).toBe("bird-twitter");
       expect(updateArg.enabled).toBe(true);
       expect(updateArg.env?.PATH).toContain("/data/.iclaw/bin");
+    });
+
+    it("fails setup when bird skill content install fails", async () => {
+      mockInstallSkill.mockRejectedValue(new Error("skills_install_failed"));
+
+      await expect(
+        setupBirdSkill({ slug: "bird", authMode: "cookies", authToken: "tok", ct0: "ct0" }),
+      ).rejects.toThrow("skills_install_failed");
+
+      expect(mockUpdateSkill).not.toHaveBeenCalled();
+    });
+
+    it("fails setup when bird SKILL.md is still missing after install", async () => {
+      mockInstallSkill.mockResolvedValue(undefined);
+      vi.spyOn(fs, "stat").mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+
+      await expect(
+        setupBirdSkill({ slug: "bird", authMode: "cookies", authToken: "tok", ct0: "ct0" }),
+      ).rejects.toThrow("bird_skill_content_missing");
+
+      expect(mockUpdateSkill).not.toHaveBeenCalled();
     });
   });
 
