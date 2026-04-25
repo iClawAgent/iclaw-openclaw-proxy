@@ -173,6 +173,17 @@ export async function verifyBirdRuntime(): Promise<{
   }
 }
 
+async function ensureBirdOnSystemPath(): Promise<void> {
+  try {
+    await fs.unlink("/usr/local/bin/bird").catch(() => {});
+    await fs.symlink(BIRD_BIN_PATH, "/usr/local/bin/bird");
+  } catch (err) {
+    throw new Error(
+      `Failed to expose bird on PATH: ${err instanceof Error ? err.message : "unknown"}`,
+    );
+  }
+}
+
 // ─── Dependency Installation ──────────────────────────────────────────────
 
 /**
@@ -223,8 +234,7 @@ export async function installBirdDependency(): Promise<void> {
     // Guaranteed-PATH symlink: fail hard on error. Production containers run as root
     // so /usr/local/bin is always writable. This ensures `bird` resolves for the
     // skill runner without relying on skills.update PATH propagation (non-guaranteed).
-    await fs.unlink("/usr/local/bin/bird").catch(() => {});
-    await fs.symlink(BIRD_BIN_PATH, "/usr/local/bin/bird");
+    await ensureBirdOnSystemPath();
   } catch (err) {
     if (err instanceof Error && err.message === "bird_persistent_path_unavailable") {
       throw err;
@@ -278,6 +288,7 @@ export async function setupBirdSkill(
       await installBirdDependency();
       installedDependency = true;
     }
+    await ensureBirdOnSystemPath();
 
     // 4. Write credentials to file
     console.log("[sidecar] Writing bird credentials...");
@@ -293,7 +304,11 @@ export async function setupBirdSkill(
     await updateSkill({
       skillKey: BIRD_CLAWHUB_SLUG,
       enabled: true,
-      env: { PATH: `/data/.iclaw/bin:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}` },
+      env: {
+        PATH: `/data/.iclaw/bin:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+        AUTH_TOKEN: req.authToken,
+        CT0: req.ct0,
+      },
     });
 
     // 6. Verify bird runtime with credentials

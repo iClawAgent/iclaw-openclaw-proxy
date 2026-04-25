@@ -36,6 +36,7 @@ vi.mock("../services/gateway-rpc.js", () => ({
 
 describe("bird-skill service", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     vi.clearAllMocks();
   });
 
@@ -162,6 +163,8 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
+      vi.spyOn(fs, "unlink").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "symlink").mockResolvedValue(undefined as any);
     });
 
     function setupSuccessMocks() {
@@ -197,6 +200,8 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
+      vi.spyOn(fs, "unlink").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "symlink").mockResolvedValue(undefined as any);
     });
 
     it("bird whoami is invoked with AUTH_TOKEN and CT0 in env, not in argv", async () => {
@@ -227,9 +232,11 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "writeFile").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "rename").mockResolvedValue(undefined as any);
       vi.spyOn(fs, "stat").mockResolvedValue({ isFile: () => true } as any);
+      vi.spyOn(fs, "unlink").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "symlink").mockResolvedValue(undefined as any);
     });
 
-    it("updateSkill is called with PATH env including /data/.iclaw/bin", async () => {
+    it("updateSkill is called with PATH and credential env for OpenClaw skill runtime", async () => {
       mockInstallSkill.mockResolvedValue(undefined);
       mockUpdateSkill.mockResolvedValue(undefined);
       mockExecFileAsync
@@ -244,6 +251,9 @@ describe("bird-skill service", () => {
       expect(updateArg.skillKey).toBe("bird-twitter");
       expect(updateArg.enabled).toBe(true);
       expect(updateArg.env?.PATH).toContain("/data/.iclaw/bin");
+      expect(updateArg.env?.AUTH_TOKEN).toBe("tok");
+      expect(updateArg.env?.CT0).toBe("ct0");
+      expect(fs.symlink).toHaveBeenCalledWith("/data/.iclaw/bin/bird", "/usr/local/bin/bird");
     });
 
     it("fails setup when bird skill content install fails", async () => {
