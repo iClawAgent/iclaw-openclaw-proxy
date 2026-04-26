@@ -31,32 +31,40 @@ vi.mock("node:child_process", () => ({
   execFileSync: mockExecFileSync,
 }));
 
-// Set env before importing module under test
-vi.stubEnv("OPENCLAW_STATE_DIR", "/data");
-vi.stubEnv("OPENCLAW_CONFIG_PATH", "/data/openclaw.json");
+// NOTE: workspace-files.ts evaluates STATE_DIR and CONFIG_PATH at module load time
+// (via lib/state-dir.ts), so we cannot vary them per-test via vi.stubEnv after import.
+// Tests verify the behavior of the module as loaded. The default state dir is /data,
+// which is the backward-compatible fallback until Phase 2 sets OPENCLAW_STATE_DIR
+// explicitly in provisioning.
 
 import { listWorkspaceFiles } from "../services/workspace-files.js";
 
-describe("workspace-files — SKILLS_DIR uses canonical /data/skills path", () => {
+// The default STATE_DIR when OPENCLAW_STATE_DIR is not set
+const DEFAULT_STATE_DIR = "/data";
+
+describe("workspace-files — SKILLS_DIR derives from OPENCLAW_STATE_DIR", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // resolveWorkspaceDir: config read fails -> default /data/workspace
+    // resolveWorkspaceDir: config read fails -> default ${STATE_DIR}/workspace
     mockReadFileSync.mockImplementation(() => {
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     });
   });
 
-  it("reads skills from /data/skills (canonical path)", async () => {
+  it("reads skills from STATE_DIR/skills (derived path)", async () => {
+    const skillsDir = `${DEFAULT_STATE_DIR}/skills`;
+    const workspaceDir = `${DEFAULT_STATE_DIR}/workspace`;
+
     mockReaddir.mockImplementation((dir: string) => {
-      if (dir === "/data/workspace") return Promise.resolve([]);
-      if (dir === "/data/skills") return Promise.resolve(["my-skill"]);
+      if (dir === workspaceDir) return Promise.resolve([]);
+      if (dir === skillsDir) return Promise.resolve(["my-skill"]);
       return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     });
 
     mockStat.mockImplementation((p: string) => {
-      if (p === "/data/skills/my-skill")
+      if (p === `${skillsDir}/my-skill`)
         return Promise.resolve({ isDirectory: () => true, isFile: () => false });
-      if (p === "/data/skills/my-skill/SKILL.md")
+      if (p === `${skillsDir}/my-skill/SKILL.md`)
         return Promise.resolve({
           isFile: () => true,
           isDirectory: () => false,
@@ -73,7 +81,7 @@ describe("workspace-files — SKILLS_DIR uses canonical /data/skills path", () =
     expect(skill!.category).toBe("skill");
   });
 
-  it("tolerates missing /data/skills dir without throwing", async () => {
+  it("tolerates missing STATE_DIR/skills dir without throwing", async () => {
     mockReaddir.mockImplementation(() => {
       return Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     });
@@ -81,13 +89,20 @@ describe("workspace-files — SKILLS_DIR uses canonical /data/skills path", () =
     const result = await listWorkspaceFiles();
     expect(result.files).toHaveLength(0);
   });
+
+  it("workspaceDir returned uses STATE_DIR as root", async () => {
+    mockReaddir.mockResolvedValue([]);
+    const result = await listWorkspaceFiles();
+    expect(result.workspaceDir).toBe(`${DEFAULT_STATE_DIR}/workspace`);
+  });
 });
 
 describe("workspace-files — CONFIG_PATH respects OPENCLAW_CONFIG_PATH env", () => {
-  it("CONFIG_PATH is /data/openclaw.json when env is set", () => {
+  it("CONFIG_PATH defaults to STATE_DIR/openclaw.json when OPENCLAW_CONFIG_PATH is not set", () => {
     // The module sets CONFIG_PATH at module load from process.env.OPENCLAW_CONFIG_PATH.
-    // Since we stubbed it to /data/openclaw.json, resolveWorkspaceDir will attempt
-    // to read that path. We verify by confirming readFileSync is called with that path.
+    // Since OPENCLAW_CONFIG_PATH is not set in this test env, it falls back to
+    // STATE_DIR/openclaw.json. We verify by confirming readFileSync is called with
+    // the default-derived path.
     let capturedPath: unknown;
     mockReadFileSync.mockImplementation((filePath: unknown) => {
       capturedPath = filePath;
@@ -97,7 +112,7 @@ describe("workspace-files — CONFIG_PATH respects OPENCLAW_CONFIG_PATH env", ()
     // Trigger resolveWorkspaceDir through listWorkspaceFiles
     mockReaddir.mockResolvedValue([]);
     return listWorkspaceFiles().then(() => {
-      expect(capturedPath).toBe("/data/openclaw.json");
+      expect(capturedPath).toBe(`${DEFAULT_STATE_DIR}/openclaw.json`);
     });
   });
 });

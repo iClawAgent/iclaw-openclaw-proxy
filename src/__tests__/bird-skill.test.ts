@@ -6,11 +6,11 @@ import {
   verifyBirdRuntime,
   setupBirdSkill,
   installBirdDependency,
-  BIRD_BIN_PATH,
-  BIRD_INSTALL_PREFIX,
-  BIRD_CREDENTIALS_PATH,
+  getBirdBinPath,
+  getBirdInstallPrefix,
+  getBirdCredentialsPath,
+  getBirdSkillMdPath,
   BIRD_CLAWHUB_SLUG,
-  BIRD_SKILL_MD_PATH,
   type BirdSetupRequest,
 } from "../services/bird-skill.js";
 
@@ -33,6 +33,11 @@ vi.mock("../services/gateway-rpc.js", () => ({
   installSkillFromClawHub: mockInstallSkill,
   updateSkill: mockUpdateSkill,
 }));
+
+// Stub OPENCLAW_STATE_DIR for all tests in this file.
+// The getter functions read process.env at call time, so this value is used
+// consistently across all tests without needing to re-import the module.
+vi.stubEnv("OPENCLAW_STATE_DIR", "/test-state");
 
 describe("bird-skill service", () => {
   beforeEach(() => {
@@ -74,35 +79,42 @@ describe("bird-skill service", () => {
     });
   });
 
-  // ─── Constants ────────────────────────────────────────────────────────────
+  // ─── Path getter functions ────────────────────────────────────────────────
 
-  describe("constants", () => {
-    it("BIRD_BIN_PATH equals /data/.iclaw/bin/bird", () => {
-      expect(BIRD_BIN_PATH).toBe("/data/.iclaw/bin/bird");
+  describe("path getters", () => {
+    it("getBirdInstallPrefix derives from OPENCLAW_STATE_DIR", () => {
+      expect(getBirdInstallPrefix()).toBe("/test-state/.iclaw");
     });
 
-    it("BIRD_INSTALL_PREFIX equals /data/.iclaw", () => {
-      expect(BIRD_INSTALL_PREFIX).toBe("/data/.iclaw");
+    it("getBirdBinPath derives from OPENCLAW_STATE_DIR", () => {
+      expect(getBirdBinPath()).toBe("/test-state/.iclaw/bin/bird");
     });
 
-    it("BIRD_BIN_PATH is derived from BIRD_INSTALL_PREFIX", () => {
-      expect(BIRD_BIN_PATH).toBe(`${BIRD_INSTALL_PREFIX}/bin/bird`);
+    it("getBirdBinPath is derived from getBirdInstallPrefix", () => {
+      expect(getBirdBinPath()).toBe(`${getBirdInstallPrefix()}/bin/bird`);
     });
 
-    it("BIRD_CREDENTIALS_PATH is /data/.iclaw/skills/bird/credentials.json", () => {
-      expect(BIRD_CREDENTIALS_PATH).toBe("/data/.iclaw/skills/bird/credentials.json");
+    it("getBirdCredentialsPath derives from OPENCLAW_STATE_DIR", () => {
+      expect(getBirdCredentialsPath()).toBe("/test-state/.iclaw/skills/bird/credentials.json");
+    });
+
+    it("getBirdSkillMdPath derives from OPENCLAW_STATE_DIR", () => {
+      expect(getBirdSkillMdPath()).toBe(`/test-state/skills/${BIRD_CLAWHUB_SLUG}/SKILL.md`);
     });
 
     it("BIRD_CLAWHUB_SLUG is the OpenClaw ClawHub slug", () => {
       expect(BIRD_CLAWHUB_SLUG).toBe("bird-twitter");
     });
 
-    it("BIRD_SKILL_MD_PATH is /data/skills/bird-twitter/SKILL.md", () => {
-      expect(BIRD_SKILL_MD_PATH).toBe("/data/skills/bird-twitter/SKILL.md");
+    it("getBirdBinPath starts with / (absolute path)", () => {
+      expect(getBirdBinPath().startsWith("/")).toBe(true);
     });
 
-    it("BIRD_BIN_PATH starts with / (absolute path)", () => {
-      expect(BIRD_BIN_PATH.startsWith("/")).toBe(true);
+    it("paths contain no /data literal — all derived from STATE_DIR", () => {
+      expect(getBirdBinPath()).not.toContain("/data");
+      expect(getBirdInstallPrefix()).not.toContain("/data");
+      expect(getBirdCredentialsPath()).not.toContain("/data");
+      expect(getBirdSkillMdPath()).not.toContain("/data");
     });
   });
 
@@ -119,12 +131,12 @@ describe("bird-skill service", () => {
   // ─── verifyBirdRuntime ────────────────────────────────────────────────────
 
   describe("verifyBirdRuntime", () => {
-    it("calls execFileAsync with BIRD_BIN_PATH and --version (absolute path)", async () => {
+    it("calls execFileAsync with getBirdBinPath() and --version (absolute path)", async () => {
       mockExecFileAsync.mockResolvedValueOnce({ stdout: "bird 1.0.0\n", stderr: "" });
       const result = await verifyBirdRuntime();
       expect(mockExecFileAsync).toHaveBeenCalledOnce();
       const [cmd, args] = mockExecFileAsync.mock.calls[0];
-      expect(cmd).toBe(BIRD_BIN_PATH);
+      expect(cmd).toBe(getBirdBinPath());
       expect(args).toContain("--version");
       expect(result.installed).toBe(true);
     });
@@ -236,7 +248,7 @@ describe("bird-skill service", () => {
       vi.spyOn(fs, "symlink").mockResolvedValue(undefined as any);
     });
 
-    it("updateSkill is called with PATH and credential env for OpenClaw skill runtime", async () => {
+    it("updateSkill is called with PATH derived from STATE_DIR and credential env", async () => {
       mockInstallSkill.mockResolvedValue(undefined);
       mockUpdateSkill.mockResolvedValue(undefined);
       mockExecFileAsync
@@ -250,10 +262,13 @@ describe("bird-skill service", () => {
       const updateArg = mockUpdateSkill.mock.calls[0][0];
       expect(updateArg.skillKey).toBe("bird-twitter");
       expect(updateArg.enabled).toBe(true);
-      expect(updateArg.env?.PATH).toContain("/data/.iclaw/bin");
+      // PATH must contain the bin dir derived from STATE_DIR — not a hardcoded /data path
+      expect(updateArg.env?.PATH).toContain("/test-state/.iclaw/bin");
+      expect(updateArg.env?.PATH).not.toContain("/data");
       expect(updateArg.env?.AUTH_TOKEN).toBe("tok");
       expect(updateArg.env?.CT0).toBe("ct0");
-      expect(fs.symlink).toHaveBeenCalledWith("/data/.iclaw/bin/bird", "/usr/local/bin/bird");
+      // symlink must use the STATE_DIR-derived bin path
+      expect(fs.symlink).toHaveBeenCalledWith("/test-state/.iclaw/bin/bird", "/usr/local/bin/bird");
     });
 
     it("fails setup when bird skill content install fails", async () => {
@@ -302,7 +317,7 @@ describe("bird-skill service", () => {
   // ─── installBirdDependency ────────────────────────────────────────────────
 
   describe("installBirdDependency", () => {
-    it("writes wrapper script at BIRD_BIN_PATH and best-effort symlinks /usr/local/bin/bird", async () => {
+    it("writes wrapper script at getBirdBinPath() and best-effort symlinks /usr/local/bin/bird", async () => {
       // npm install
       mockExecFileAsync.mockResolvedValueOnce({ stdout: "", stderr: "" });
 
@@ -314,22 +329,25 @@ describe("bird-skill service", () => {
 
       await installBirdDependency();
 
+      const binPath = getBirdBinPath();
+      const installPrefix = getBirdInstallPrefix();
+
       // Bin directory created before writing the wrapper
       expect(mkdirSpy).toHaveBeenCalledWith(
-        `${BIRD_INSTALL_PREFIX}/bin`,
+        `${installPrefix}/bin`,
         expect.objectContaining({ recursive: true }),
       );
 
       // Wrapper script written at the canonical absolute path
       expect(writeFileSpy).toHaveBeenCalledWith(
-        `${BIRD_BIN_PATH}.tmp`,
-        expect.stringContaining(`exec ${BIRD_INSTALL_PREFIX}/node_modules/.bin/bird`),
+        `${binPath}.tmp`,
+        expect.stringContaining(`exec ${installPrefix}/node_modules/.bin/bird`),
         expect.objectContaining({ mode: 0o755 }),
       );
-      expect(renameSpy).toHaveBeenCalledWith(`${BIRD_BIN_PATH}.tmp`, BIRD_BIN_PATH);
+      expect(renameSpy).toHaveBeenCalledWith(`${binPath}.tmp`, binPath);
 
       // Guaranteed-PATH symlink attempted at /usr/local/bin/bird
-      expect(symlinkSpy).toHaveBeenCalledWith(BIRD_BIN_PATH, "/usr/local/bin/bird");
+      expect(symlinkSpy).toHaveBeenCalledWith(binPath, "/usr/local/bin/bird");
 
       mkdirSpy.mockRestore();
       writeFileSpy.mockRestore();

@@ -9,12 +9,12 @@ import type {
   SkillStatusResponse,
   SkillDepInstallResponse,
 } from "../contracts.js";
+import { STATE_DIR } from "../lib/state-dir.js";
 
 const execFileAsync = promisify(execFile);
 
 const OPENCLAW_BIN = "openclaw";
 const CMD_TIMEOUT_MS = 35_000;
-const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
 const GATEWAY_PORT = process.env.GATEWAY_PORT ?? "18789";
 // CONFIG_PATH: prefer explicit env (belt), fall back to state-dir derivation (suspenders)
 const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH ?? `${STATE_DIR}/openclaw.json`;
@@ -117,10 +117,11 @@ const SKILL_INSTALL_TIMEOUT_MS = 120_000;
 export async function installSkillFromClawHub(
   slug: string,
 ): Promise<SkillContentInstallResponse> {
-  // Symlink safety check: $HOME/.openclaw must resolve to STATE_DIR before
-  // invoking the CLI. If the symlink is missing (e.g. openclaw init wiped it),
-  // the CLI may write to the wrong location. Bootstrap recreates it on next
-  // restart; within a session we fail fast instead of silently misrouting data.
+  // Identity check: $HOME/.openclaw must resolve (via realpath) to STATE_DIR before
+  // invoking the CLI. This confirms the real filesystem path matches the canonical
+  // state root — either they are the same directory or a legacy symlink points there.
+  // If they diverge (e.g. stale symlink after migration), the CLI may write to the
+  // wrong location. Fail fast instead of silently misrouting data.
   const homeOpenClaw = path.join(process.env.HOME ?? "/root", ".openclaw");
   try {
     const real = await fs.realpath(homeOpenClaw);
@@ -143,11 +144,10 @@ export async function installSkillFromClawHub(
       { timeout: SKILL_INSTALL_TIMEOUT_MS, env: openclawExecEnv() },
     );
 
-    // Canonical skill path is /data/skills/<slug> (OQ2/OQ3 unverified; see
-    // bootstrap-cmd.ts TODO). With the symlink in place, $HOME/.openclaw/...
-    // writes resolve into /data/..., so the homeSrc path is actually inside
-    // STATE_DIR already. We guard against deleting through the symlink into
-    // the canonical tree by checking realpath equality before any removal.
+    // Canonical skill path is STATE_DIR/skills/<slug>. With STATE_DIR at the
+    // native state root ($HOME/.openclaw), $HOME/.openclaw/... writes resolve
+    // directly into STATE_DIR. We guard against double-deleting through any
+    // residual symlink by checking realpath equality before removal.
     const homeSrc = path.join(
       process.env.HOME ?? "/root",
       ".openclaw",
@@ -195,7 +195,7 @@ export async function removeSkillFromWorkspace(
 ): Promise<SkillContentRemoveResponse> {
   const stateDir = STATE_DIR;
 
-  // Remove from canonical skill dir (/data/skills/<slug>)
+  // Remove from canonical skill dir (STATE_DIR/skills/<slug>)
   const canonicalDir = path.join(stateDir, "skills", slug);
   const resolvedCanonical = path.resolve(canonicalDir);
   const allowedSkills = path.resolve(stateDir, "skills");
@@ -205,10 +205,10 @@ export async function removeSkillFromWorkspace(
   await fs.rm(resolvedCanonical, { recursive: true, force: true });
 
   // Only remove the $HOME/.openclaw path if it resolves to a different real
-  // location (i.e. the symlink is absent or points elsewhere). With the
-  // $HOME/.openclaw -> /data symlink in place, both paths resolve to the same
-  // canonical tree and a second rm would be a harmless no-op — but we guard
-  // explicitly to avoid double-deleting through a future symlink change.
+  // location (i.e. a legacy symlink is absent or points elsewhere). When
+  // STATE_DIR is the native state root, both paths resolve to the same tree
+  // and a second rm would be a harmless no-op — but we guard explicitly to
+  // avoid double-deleting through any residual symlink configuration.
   const homeDir = path.join(
     process.env.HOME ?? "/root",
     ".openclaw",

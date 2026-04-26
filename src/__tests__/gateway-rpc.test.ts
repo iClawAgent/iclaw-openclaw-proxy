@@ -37,9 +37,11 @@ vi.mock("node:fs", () => ({
   readFileSync: mockReadFileSync,
 }));
 
-// Set env before importing module under test
-vi.stubEnv("OPENCLAW_STATE_DIR", "/data");
-vi.stubEnv("OPENCLAW_CONFIG_PATH", "/data/openclaw.json");
+// NOTE: gateway-rpc.ts evaluates STATE_DIR at module load time (via lib/state-dir.ts).
+// vi.stubEnv is NOT applied before ESM module evaluation in vitest (imports are hoisted).
+// Tests use the effective module-load-time default: STATE_DIR=/data (backward-compatible
+// fallback until Phase 2 sets OPENCLAW_STATE_DIR explicitly in provisioning).
+// The HOME stub is still useful for constructing expected $HOME paths.
 vi.stubEnv("HOME", "/root");
 
 import {
@@ -47,11 +49,15 @@ import {
   removeSkillFromWorkspace,
 } from "../services/gateway-rpc.js";
 
+// The default STATE_DIR when OPENCLAW_STATE_DIR is not set in test env.
+const STATE_DIR = "/data";
+const CONFIG_PATH = `${STATE_DIR}/openclaw.json`;
+
 describe("openclawExecEnv — every CLI call receives both env vars", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // Default: symlink is valid
-    mockFsRealpath.mockResolvedValue("/data");
+    // Default: symlink is valid — $HOME/.openclaw resolves to STATE_DIR
+    mockFsRealpath.mockResolvedValue(STATE_DIR);
     mockReadFileSync.mockImplementation(() => {
       throw new Error("ENOENT");
     });
@@ -59,10 +65,10 @@ describe("openclawExecEnv — every CLI call receives both env vars", () => {
 
   it("installSkillFromClawHub passes OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH to execFileAsync", async () => {
     mockExecFileAsync.mockResolvedValue({ stdout: "installed", stderr: "" });
-    // Symlink resolves to /data
+    // Symlink resolves to STATE_DIR
     mockFsRealpath
-      .mockResolvedValueOnce("/data")   // realpath of $HOME/.openclaw for symlink check
-      .mockResolvedValueOnce("/data/workspace/skills"); // realpath of homeSrc parent
+      .mockResolvedValueOnce(STATE_DIR)   // realpath of $HOME/.openclaw for symlink check
+      .mockResolvedValueOnce(`${STATE_DIR}/workspace/skills`); // realpath of homeSrc parent
 
     await installSkillFromClawHub("my-skill");
 
@@ -71,8 +77,8 @@ describe("openclawExecEnv — every CLI call receives both env vars", () => {
       ["skills", "install", "--", "my-skill"],
       expect.objectContaining({
         env: expect.objectContaining({
-          OPENCLAW_STATE_DIR: "/data",
-          OPENCLAW_CONFIG_PATH: "/data/openclaw.json",
+          OPENCLAW_STATE_DIR: STATE_DIR,
+          OPENCLAW_CONFIG_PATH: CONFIG_PATH,
         }),
       }),
     );
@@ -103,8 +109,8 @@ describe("installSkillFromClawHub — symlink safety check", () => {
 
   it("proceeds with install when symlink resolves to STATE_DIR", async () => {
     mockFsRealpath
-      .mockResolvedValueOnce("/data")   // symlink check
-      .mockResolvedValueOnce("/data/workspace/skills"); // homeSrc parent
+      .mockResolvedValueOnce(STATE_DIR)   // symlink check
+      .mockResolvedValueOnce(`${STATE_DIR}/workspace/skills`); // homeSrc parent
 
     mockExecFileAsync.mockResolvedValue({ stdout: "installed", stderr: "" });
 
@@ -123,12 +129,12 @@ describe("installSkillFromClawHub — does not delete through symlink into canon
   });
 
   it("skips copy+remove when homeSrc and canonicalDst resolve to the same real path", async () => {
-    // With symlink active, $HOME/.openclaw/workspace/skills resolves to /data/workspace/skills
-    // and /data/skills resolves to /data/skills — different, so copy happens.
-    // When they are the same (e.g. canonical changed to /data/workspace/skills), skip.
+    // With symlink active, $HOME/.openclaw/workspace/skills resolves to STATE_DIR/workspace/skills
+    // and STATE_DIR/skills is the canonical target — different dirs so normally copy happens.
+    // When homeSrc parent resolves to canonical skills dir, skip copy.
     mockFsRealpath
-      .mockResolvedValueOnce("/data")          // symlink check (HOME/.openclaw -> /data)
-      .mockResolvedValueOnce("/data/skills");   // homeSrc parent = same as canonicalDst parent
+      .mockResolvedValueOnce(STATE_DIR)              // symlink check (HOME/.openclaw -> STATE_DIR)
+      .mockResolvedValueOnce(`${STATE_DIR}/skills`); // homeSrc parent = same as canonicalDst parent
 
     mockExecFileAsync.mockResolvedValue({ stdout: "installed", stderr: "" });
 
@@ -146,8 +152,8 @@ describe("removeSkillFromWorkspace — does not double-delete through symlink", 
   });
 
   it("skips home-dir rm when it resolves to the same canonical path", async () => {
-    // homeParentReal = /data/skills (same as canonical /data/skills)
-    mockFsRealpath.mockResolvedValue("/data/skills");
+    // homeParentReal = STATE_DIR/skills (same as canonical STATE_DIR/skills)
+    mockFsRealpath.mockResolvedValue(`${STATE_DIR}/skills`);
     mockFsRm.mockResolvedValue(undefined);
 
     await removeSkillFromWorkspace("my-skill");
@@ -155,7 +161,7 @@ describe("removeSkillFromWorkspace — does not double-delete through symlink", 
     // Should only rm the canonical path once
     expect(mockFsRm).toHaveBeenCalledOnce();
     expect(mockFsRm).toHaveBeenCalledWith(
-      expect.stringContaining("/data/skills/my-skill"),
+      expect.stringContaining(`${STATE_DIR}/skills/my-skill`),
       expect.objectContaining({ recursive: true, force: true }),
     );
   });

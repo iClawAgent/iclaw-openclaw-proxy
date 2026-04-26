@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { installSkillFromClawHub, updateSkill } from "./gateway-rpc.js";
+import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
 
 // Local types — sidecar is a git submodule and MUST NOT import from @iclawagent/shared.
 // Keep in sync with packages/shared/src/types.ts BirdSkillSetupRequest/Response manually.
@@ -29,12 +30,46 @@ export interface BirdSetupResponse {
 
 const execFileAsync = promisify(execFile);
 
-// Bird binary and credential paths (Phase 1 — deterministic per-instance)
-export const BIRD_BIN_PATH = "/data/.iclaw/bin/bird";
-export const BIRD_INSTALL_PREFIX = "/data/.iclaw";
-export const BIRD_CREDENTIALS_PATH = "/data/.iclaw/skills/bird/credentials.json";
+// ─── Path Getters ─────────────────────────────────────────────────────────────
+//
+// The absolute-path guard runs at module load time via the lib/state-dir.ts import
+// (consistent with workspace-files, gateway-rpc, backup, and codex-oauth).
+//
+// The getter functions still read OPENCLAW_STATE_DIR at call time so that tests
+// can override the env var with vi.stubEnv without re-importing the module.
+// The /data fallback matches the module-load-time default in lib/state-dir.ts.
+
 export const BIRD_CLAWHUB_SLUG = "bird-twitter";
-export const BIRD_SKILL_MD_PATH = `/data/skills/${BIRD_CLAWHUB_SLUG}/SKILL.md`;
+
+function getStateDir(): string {
+  const val = process.env.OPENCLAW_STATE_DIR;
+  if (val && !val.startsWith("/")) {
+    throw new Error(
+      `OPENCLAW_STATE_DIR must be an absolute path, got: "${val}"`,
+    );
+  }
+  return val ?? "/data";
+}
+
+/** Returns the Bird install prefix derived from OPENCLAW_STATE_DIR. */
+export function getBirdInstallPrefix(): string {
+  return `${getStateDir()}/.iclaw`;
+}
+
+/** Returns the absolute path to the Bird binary derived from OPENCLAW_STATE_DIR. */
+export function getBirdBinPath(): string {
+  return `${getBirdInstallPrefix()}/bin/bird`;
+}
+
+/** Returns the absolute path to Bird credentials file derived from OPENCLAW_STATE_DIR. */
+export function getBirdCredentialsPath(): string {
+  return `${getBirdInstallPrefix()}/skills/bird/credentials.json`;
+}
+
+/** Returns the absolute path to the Bird skill SKILL.md derived from OPENCLAW_STATE_DIR. */
+export function getBirdSkillMdPath(): string {
+  return `${getStateDir()}/skills/${BIRD_CLAWHUB_SLUG}/SKILL.md`;
+}
 
 // ─── Secret Redaction ──────────────────────────────────────────────────────
 
@@ -79,20 +114,21 @@ export function redactBirdSecrets(obj: unknown): unknown {
 
 /**
  * Write bird credentials to the per-instance credential file.
- * File: /data/.iclaw/skills/bird/credentials.json (mode 0600)
- * Parent dir: /data/.iclaw/skills/bird/ (mode 0700)
+ * File: $OPENCLAW_STATE_DIR/.iclaw/skills/bird/credentials.json (mode 0600)
+ * Parent dir: $OPENCLAW_STATE_DIR/.iclaw/skills/bird/ (mode 0700)
  *
  * Uses atomic write: temp file + rename.
- * Throws if /data is not writable or not mounted.
+ * Throws if the state dir is not writable or not mounted.
  */
 export async function writeBirdCredentials(creds: {
   authMode: "cookies";
   authToken: string;
   ct0: string;
 }): Promise<void> {
+  const credentialsPath = getBirdCredentialsPath();
   try {
     // Ensure parent directory exists with 0700
-    const credDir = path.dirname(BIRD_CREDENTIALS_PATH);
+    const credDir = path.dirname(credentialsPath);
     try {
       await fs.mkdir(credDir, { mode: 0o700, recursive: true });
     } catch (err) {
@@ -103,10 +139,10 @@ export async function writeBirdCredentials(creds: {
     }
 
     // Write atomically: temp + rename
-    const tmpPath = `${BIRD_CREDENTIALS_PATH}.tmp`;
+    const tmpPath = `${credentialsPath}.tmp`;
     const content = JSON.stringify(creds);
     await fs.writeFile(tmpPath, content, { mode: 0o600 });
-    await fs.rename(tmpPath, BIRD_CREDENTIALS_PATH);
+    await fs.rename(tmpPath, credentialsPath);
   } catch (err) {
     if (err instanceof Error && err.message === "bird_persistent_path_unavailable") {
       throw err;
@@ -126,8 +162,9 @@ export async function readBirdCredentials(): Promise<{
   authToken?: string;
   ct0?: string;
 } | null> {
+  const credentialsPath = getBirdCredentialsPath();
   try {
-    const content = await fs.readFile(BIRD_CREDENTIALS_PATH, "utf-8");
+    const content = await fs.readFile(credentialsPath, "utf-8");
     return JSON.parse(content);
   } catch (err) {
     if ((err as any).code === "ENOENT") {
@@ -141,7 +178,7 @@ export async function readBirdCredentials(): Promise<{
 
 async function verifyBirdSkillContent(): Promise<void> {
   try {
-    const stat = await fs.stat(BIRD_SKILL_MD_PATH);
+    const stat = await fs.stat(getBirdSkillMdPath());
     if (!stat.isFile()) {
       throw new Error("bird_skill_content_missing");
     }
@@ -154,14 +191,15 @@ async function verifyBirdSkillContent(): Promise<void> {
 
 /**
  * Verify bird binary exists and is executable.
- * Checks: /data/.iclaw/bin/bird --version
+ * Checks: $OPENCLAW_STATE_DIR/.iclaw/bin/bird --version
  */
 export async function verifyBirdRuntime(): Promise<{
   installed: boolean;
   version?: string;
 }> {
+  const binPath = getBirdBinPath();
   try {
-    const { stdout } = await execFileAsync(BIRD_BIN_PATH, ["--version"], {
+    const { stdout } = await execFileAsync(binPath, ["--version"], {
       timeout: 5_000,
     });
     // Version output is typically "bird <version>" or similar
@@ -174,9 +212,10 @@ export async function verifyBirdRuntime(): Promise<{
 }
 
 async function ensureBirdOnSystemPath(): Promise<void> {
+  const binPath = getBirdBinPath();
   try {
     await fs.unlink("/usr/local/bin/bird").catch(() => {});
-    await fs.symlink(BIRD_BIN_PATH, "/usr/local/bin/bird");
+    await fs.symlink(binPath, "/usr/local/bin/bird");
   } catch (err) {
     throw new Error(
       `Failed to expose bird on PATH: ${err instanceof Error ? err.message : "unknown"}`,
@@ -187,27 +226,29 @@ async function ensureBirdOnSystemPath(): Promise<void> {
 // ─── Dependency Installation ──────────────────────────────────────────────
 
 /**
- * Install the @steipete/bird npm package into /data/.iclaw.
- * Then symlink /data/.iclaw/bin/bird from /data/.iclaw/node_modules/.bin/bird.
+ * Install the @steipete/bird npm package into $OPENCLAW_STATE_DIR/.iclaw.
+ * Then write a wrapper script at $OPENCLAW_STATE_DIR/.iclaw/bin/bird.
  *
- * Throws bird_persistent_path_unavailable if /data is not writable.
+ * Throws bird_persistent_path_unavailable if the state dir is not writable.
  * Uses execFileAsync (never sh -c).
  */
 export async function installBirdDependency(): Promise<void> {
+  const installPrefix = getBirdInstallPrefix();
+  const binPath = getBirdBinPath();
   try {
-    // Install @steipete/bird into /data/.iclaw
+    // Install @steipete/bird into $OPENCLAW_STATE_DIR/.iclaw
     await execFileAsync("npm", [
       "install",
       "--prefix",
-      BIRD_INSTALL_PREFIX,
+      installPrefix,
       "@steipete/bird",
     ], {
       timeout: 120_000,
     });
 
-    // Ensure /data/.iclaw/bin exists before writing the wrapper
+    // Ensure $installPrefix/bin exists before writing the wrapper
     try {
-      await fs.mkdir(`${BIRD_INSTALL_PREFIX}/bin`, { mode: 0o755, recursive: true });
+      await fs.mkdir(`${installPrefix}/bin`, { mode: 0o755, recursive: true });
     } catch (err) {
       if ((err as any).code === "EACCES") {
         throw new Error("bird_persistent_path_unavailable");
@@ -215,15 +256,15 @@ export async function installBirdDependency(): Promise<void> {
       throw err;
     }
 
-    // Write a wrapper shell script (not a symlink) so BIRD_BIN_PATH is always
+    // Write a wrapper shell script (not a symlink) so the binary is always
     // callable via absolute path regardless of PATH env propagation in the
     // skill runner (PATH propagation via skills.update is non-guaranteed in Phase 1).
-    const realBin = `${BIRD_INSTALL_PREFIX}/node_modules/.bin/bird`;
+    const realBin = `${installPrefix}/node_modules/.bin/bird`;
     const wrapperContent = `#!/bin/sh\nexec ${realBin} "$@"\n`;
-    const tmpPath = `${BIRD_BIN_PATH}.tmp`;
+    const tmpPath = `${binPath}.tmp`;
     try {
       await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
-      await fs.rename(tmpPath, BIRD_BIN_PATH);
+      await fs.rename(tmpPath, binPath);
     } catch (err) {
       if ((err as any).code === "EACCES") {
         throw new Error("bird_persistent_path_unavailable");
@@ -300,12 +341,15 @@ export async function setupBirdSkill(
 
     // 5. Enable skill via gateway and propagate PATH so OpenClaw skill runner
     //    can resolve the bird binary at the same deterministic path the sidecar uses.
+    //    PATH is derived from the Bird binary path, not hardcoded.
+    const binPath = getBirdBinPath();
+    const binDir = path.dirname(binPath);
     console.log("[sidecar] Enabling bird skill...");
     await updateSkill({
       skillKey: BIRD_CLAWHUB_SLUG,
       enabled: true,
       env: {
-        PATH: `/data/.iclaw/bin:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+        PATH: `${binDir}:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
         AUTH_TOKEN: req.authToken,
         CT0: req.ct0,
       },
@@ -318,11 +362,11 @@ export async function setupBirdSkill(
     try {
       const envWithAuth = {
         ...process.env,
-        PATH: `${BIRD_BIN_PATH.split("/").slice(0, -1).join("/")}:${process.env.PATH}`,
+        PATH: `${binDir}:${process.env.PATH}`,
         AUTH_TOKEN: req.authToken,
         CT0: req.ct0,
       };
-      const { stdout, stderr } = await execFileAsync(BIRD_BIN_PATH, [
+      const { stdout } = await execFileAsync(binPath, [
         "whoami",
         "--plain",
       ], {

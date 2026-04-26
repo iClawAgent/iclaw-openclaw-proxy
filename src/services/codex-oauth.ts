@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { setCodexOAuthAccessToken, setLlmAuthMode } from "../env.js";
-
-const STATE_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
+import { STATE_DIR } from "../lib/state-dir.js";
 
 const TOKEN_FILE = path.join(STATE_DIR, "codex-oauth.json");
 

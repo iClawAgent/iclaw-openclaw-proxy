@@ -2,8 +2,7 @@ import { unlink, readdir, rm } from "node:fs/promises";
 import path from "node:path";
 import { BACKUP_DEFAULTS } from "../backup-contract.js";
 import { restartGateway } from "./workspace-files.js";
-
-const DATA_DIR = process.env.OPENCLAW_STATE_DIR ?? "/data";
+import { STATE_DIR as DATA_DIR } from "../lib/state-dir.js";
 
 function assertSafeUrl(url: string): void {
   let parsed: URL;
