@@ -96,7 +96,7 @@ Use the Backoffice Instances page to confirm the target image is applied and the
 
 If direct instance access is available, verify:
 - OpenClaw version: `node openclaw.mjs --version`
-- Skills install path works: installed skill appears under `$OPENCLAW_STATE_DIR/skills/<slug>/SKILL.md` (Phase 1 default: `/data/skills/`; Phase 2 target: `/root/.openclaw/skills/`). Verify `$HOME/.openclaw` is a real directory, not a symlink.
+- Skills install path works: installed skill appears under `$OPENCLAW_STATE_DIR/skills/<slug>/SKILL.md` (current: `/root/.openclaw/skills/`). Verify `$HOME/.openclaw` is a real mounted directory, not a symlink.
 - Gateway health responds at `http://localhost:18789/health`
 
 ## Rollback
@@ -107,8 +107,8 @@ Use the same Backoffice UI or orchestrator upgrade flow with the previous GHCR i
 
 ## Config File
 
-- Path on container: `$OPENCLAW_STATE_DIR/openclaw.json` (Phase 1 default: `/data/openclaw.json`; Phase 2 target: `/root/.openclaw/openclaw.json`)
-- State dir env: `OPENCLAW_STATE_DIR=/data` (Phase 1 default; Phase 2 will change to `/root/.openclaw` when provisioning mounts the volume at native root)
+- Path on container: `$OPENCLAW_STATE_DIR/openclaw.json` (current: `/root/.openclaw/openclaw.json`)
+- State dir env: `OPENCLAW_STATE_DIR=/root/.openclaw` (native state root since Phase 2; the legacy `/data` path is historical)
 
 ## Key Config Gotchas
 

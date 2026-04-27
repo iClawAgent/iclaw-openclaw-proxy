@@ -33,14 +33,13 @@ vi.mock("node:child_process", () => ({
 
 // NOTE: workspace-files.ts evaluates STATE_DIR and CONFIG_PATH at module load time
 // (via lib/state-dir.ts), so we cannot vary them per-test via vi.stubEnv after import.
-// Tests verify the behavior of the module as loaded. The default state dir is /data,
-// which is the backward-compatible fallback until Phase 2 sets OPENCLAW_STATE_DIR
-// explicitly in provisioning.
+// Tests verify the behavior of the module as loaded. The default state dir is
+// /root/.openclaw (Phase 4: /data fallback removed).
 
 import { listWorkspaceFiles } from "../services/workspace-files.js";
 
-// The default STATE_DIR when OPENCLAW_STATE_DIR is not set
-const DEFAULT_STATE_DIR = "/data";
+// The default STATE_DIR when OPENCLAW_STATE_DIR is not set (Phase 4: native root)
+const DEFAULT_STATE_DIR = "/root/.openclaw";
 
 describe("workspace-files — SKILLS_DIR derives from OPENCLAW_STATE_DIR", () => {
   beforeEach(() => {

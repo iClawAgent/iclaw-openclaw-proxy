@@ -129,7 +129,7 @@ The fallback skill dependency installer parses `## Installation` code fences fro
 | `LLM_BASE_URL`                 | `https://api.openai.com` | LLM upstream base URL                                                                        |
 | `LLM_PROVIDER`                 | `openai`                 | Provider name; use `anthropic` to send `x-api-key` header instead of `Authorization: Bearer` |
 | `LLM_AUTH_MODE`                | `platform`               | Auth mode: `platform` (API key) or `codex_oauth` (OpenAI Codex OAuth)                        |
-| `OPENCLAW_STATE_DIR`           | `/data`                  | Path to OpenClaw's persistent state directory                                                |
+| `OPENCLAW_STATE_DIR`           | `/root/.openclaw`        | Path to OpenClaw's persistent state directory                                                |
 | `OPENCLAW_CONFIG_PATH`         | `$OPENCLAW_STATE_DIR/openclaw.json` | Explicit path to the OpenClaw config file; overrides the state-dir-derived default |
 | `OPENCLAW_WEBHOOK_PORT`        | `8787`                   | Port of the OpenClaw gateway webhook listener                                                |
 | `GATEWAY_PORT`                 | `18789`                  | Port of the OpenClaw gateway RPC listener                                                    |
@@ -138,7 +138,7 @@ The fallback skill dependency installer parses `## Installation` code fences fro
 
 ### State Root Invariant
 
-At runtime, `$HOME/.openclaw` is a symlink pointing to `/data` (the mounted volume). This is created by the bootstrap command before either the sidecar or the OpenClaw gateway starts. The symlink ensures that any OpenClaw CLI code path that reads `$HOME/.openclaw` directly (e.g. `skills install`, implicit cache dirs) writes into the mounted volume rather than the container's ephemeral root filesystem. Both `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` are also passed explicitly on every CLI `execFile` call as a second layer of defense.
+At runtime, `$HOME/.openclaw` (`/root/.openclaw` for the current root-runtime image) is the persistent volume mount point — a real directory, not a symlink. The volume is mounted directly at the native OpenClaw state root since Phase 2 of the state root migration. The legacy `$HOME/.openclaw -> /data` symlink approach was removed because OpenClaw's exec-approvals guard refuses to traverse symlinked parent directories. Both `OPENCLAW_STATE_DIR` and `OPENCLAW_CONFIG_PATH` are passed explicitly on every CLI `execFile` call.
 
 ---
 

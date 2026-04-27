@@ -48,7 +48,7 @@ function getStateDir(): string {
       `OPENCLAW_STATE_DIR must be an absolute path, got: "${val}"`,
     );
   }
-  return val ?? "/data";
+  return val ?? "/root/.openclaw";
 }
 
 /** Returns the Bird install prefix derived from OPENCLAW_STATE_DIR. */

@@ -39,8 +39,8 @@ vi.mock("node:fs", () => ({
 
 // NOTE: gateway-rpc.ts evaluates STATE_DIR at module load time (via lib/state-dir.ts).
 // vi.stubEnv is NOT applied before ESM module evaluation in vitest (imports are hoisted).
-// Tests use the effective module-load-time default: STATE_DIR=/data (backward-compatible
-// fallback until Phase 2 sets OPENCLAW_STATE_DIR explicitly in provisioning).
+// Tests use the effective module-load-time default: STATE_DIR=/root/.openclaw
+// (Phase 4: /data fallback removed).
 // The HOME stub is still useful for constructing expected $HOME paths.
 vi.stubEnv("HOME", "/root");
 
@@ -49,8 +49,8 @@ import {
   removeSkillFromWorkspace,
 } from "../services/gateway-rpc.js";
 
-// The default STATE_DIR when OPENCLAW_STATE_DIR is not set in test env.
-const STATE_DIR = "/data";
+// The default STATE_DIR when OPENCLAW_STATE_DIR is not set in test env (Phase 4: native root).
+const STATE_DIR = "/root/.openclaw";
 const CONFIG_PATH = `${STATE_DIR}/openclaw.json`;
 
 describe("openclawExecEnv — every CLI call receives both env vars", () => {

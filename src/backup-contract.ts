@@ -6,7 +6,11 @@ export const BACKUP_DEFAULTS = {
   excludeDirs: ["cache", "completions", "debug-proxy"],
   /** Current layout version. v1 = native state root (/root/.openclaw). */
   currentStateRootVersion: "v1" as const,
-  /** Legacy layout used before Phase 2. Archives rooted at /data. */
+  /**
+   * @deprecated Historical: the legacy state root used before Phase 2.
+   * Kept for restore compatibility when extracting old backup archives rooted at /data.
+   * Do not use as a default or active state root path.
+   */
   legacyStateRoot: "/data" as const,
 } as const;
 

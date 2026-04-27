@@ -52,11 +52,11 @@ describe("lib/state-dir — module-load-time guard", () => {
     expect(mod.STATE_DIR).toBe("/data");
   });
 
-  it("exports STATE_DIR as exactly /data when OPENCLAW_STATE_DIR is absent", async () => {
+  it("exports STATE_DIR as exactly /root/.openclaw when OPENCLAW_STATE_DIR is absent", async () => {
     // Ensure the var is absent (not just empty) by deleting it before reset.
     delete process.env.OPENCLAW_STATE_DIR;
     vi.resetModules();
     const mod = await import("../lib/state-dir.js");
-    expect(mod.STATE_DIR).toBe("/data");
+    expect(mod.STATE_DIR).toBe("/root/.openclaw");
   });
 });

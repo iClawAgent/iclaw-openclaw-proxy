@@ -48,9 +48,8 @@ vi.mock("./workspace-files.js", () => ({
 }));
 
 // NOTE: backup.ts evaluates DATA_DIR at module load time from OPENCLAW_STATE_DIR
-// (via lib/state-dir.ts). The default is /data when the env var is not set,
-// preserving backward compatibility with existing instances until Phase 2.
-const DEFAULT_STATE_DIR = "/data";
+// (via lib/state-dir.ts). The default is /root/.openclaw (Phase 4: /data fallback removed).
+const DEFAULT_STATE_DIR = "/root/.openclaw";
 
 import {
   createBackupTarball,
@@ -170,10 +169,10 @@ describe("backup", () => {
       expect(() => new Date(result.metadata.createdAt)).not.toThrow();
     });
 
-    it("metadata stateRootVersion is v0 when DATA_DIR is /data (legacy layout)", async () => {
-      // DEFAULT_STATE_DIR == "/data" in this test environment (env var not set)
-      const result = await createBackupTarball("v0-test");
-      expect(result.metadata.stateRootVersion).toBe("v0");
+    it("metadata stateRootVersion is v1 when DATA_DIR is /root/.openclaw (native layout)", async () => {
+      // DEFAULT_STATE_DIR == "/root/.openclaw" in this test environment (env var not set, Phase 4)
+      const result = await createBackupTarball("v1-test");
+      expect(result.metadata.stateRootVersion).toBe("v1");
     });
 
     it("metadata stateRoot matches DATA_DIR", async () => {
