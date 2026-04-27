@@ -23,6 +23,7 @@ import {
   writeAuthProfiles,
   clearAuthProfiles,
   CODEX_OAUTH_DEFAULT_MODEL,
+  withCodexOAuthTransition,
 } from "../services/codex-oauth.js";
 import {
   relayConfigPatch,
@@ -269,30 +270,32 @@ adminRouter.post("/admin/activate-codex-oauth", async (c) => {
     );
   }
 
-  // 1) Persist durable retry state first: tokens + auth profile on disk.
-  //    Do NOT flip auth mode yet — activation is only "connected" after the
-  //    Gateway patch confirms openai-codex is the default model.
-  storeTokens(accessToken, refreshToken, expiresIn);
-  writeAuthProfiles(accessToken, refreshToken, expiresIn);
+  return withCodexOAuthTransition(async () => {
+    // 1) Persist durable retry state first: tokens + auth profile on disk.
+    //    Do NOT flip auth mode yet — activation is only "connected" after the
+    //    Gateway patch confirms openai-codex is the default model.
+    storeTokens(accessToken, refreshToken, expiresIn);
+    writeAuthProfiles(accessToken, refreshToken, expiresIn);
 
-  // 2) Attempt the Gateway config patch. If this fails, retryable state is
-  //    preserved but we surface a non-2xx so the caller can re-drive.
-  const modelPatch = JSON.stringify({
-    agents: { defaults: { model: CODEX_OAUTH_DEFAULT_MODEL } },
+    // 2) Attempt the Gateway config patch. If this fails, retryable state is
+    //    preserved but we surface a non-2xx so the caller can re-drive.
+    const modelPatch = JSON.stringify({
+      agents: { defaults: { model: CODEX_OAUTH_DEFAULT_MODEL } },
+    });
+    try {
+      await relayConfigPatch(modelPatch);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "activate_patch_failed";
+      console.error("[sidecar] activate-codex-oauth gateway patch failed:", message);
+      return c.json({ error: message }, 502);
+    }
+
+    // 3) Patch succeeded — flip sidecar auth mode to codex_oauth.
+    setLlmAuthMode("codex_oauth");
+
+    console.log("[sidecar] Codex OAuth activated (openai-codex provider)");
+    return c.json({ ok: true });
   });
-  try {
-    await relayConfigPatch(modelPatch);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "activate_patch_failed";
-    console.error("[sidecar] activate-codex-oauth gateway patch failed:", message);
-    return c.json({ error: message }, 502);
-  }
-
-  // 3) Patch succeeded — flip sidecar auth mode to codex_oauth.
-  setLlmAuthMode("codex_oauth");
-
-  console.log("[sidecar] Codex OAuth activated (openai-codex provider)");
-  return c.json({ ok: true });
 });
 
 /**
@@ -303,28 +306,30 @@ adminRouter.post("/admin/activate-codex-oauth", async (c) => {
 adminRouter.post("/admin/deactivate-codex-oauth", async (c) => {
   const body = await c.req.json<{ restoreModel?: string }>().catch(() => ({} as { restoreModel?: string }));
 
-  // 1) Patch Gateway back to the restore model first. If this fails, keep
-  //    tokens/profiles intact so a retry can still succeed, and return non-2xx.
-  const restoreModel = body.restoreModel ?? "openai/gpt-4o";
-  const modelPatch = JSON.stringify({
-    agents: { defaults: { model: restoreModel } },
+  return withCodexOAuthTransition(async () => {
+    // 1) Patch Gateway back to the restore model first. If this fails, keep
+    //    tokens/profiles intact so a retry can still succeed, and return non-2xx.
+    const restoreModel = body.restoreModel ?? "openai/gpt-4o";
+    const modelPatch = JSON.stringify({
+      agents: { defaults: { model: restoreModel } },
+    });
+    try {
+      await relayConfigPatch(modelPatch);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "deactivate_patch_failed";
+      console.error("[sidecar] deactivate-codex-oauth gateway patch failed:", message);
+      return c.json({ error: message }, 502);
+    }
+
+    // 2) Patch succeeded — clear auth profiles/tokens and switch auth mode
+    //    back to platform. (clearTokens() resets llmAuthMode to "platform".)
+    clearAuthProfiles();
+    clearTokens();
+
+    console.log("[sidecar] Codex OAuth deactivated (openai-codex profiles cleared)");
+    return c.json({ ok: true });
   });
-  try {
-    await relayConfigPatch(modelPatch);
-  } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "deactivate_patch_failed";
-    console.error("[sidecar] deactivate-codex-oauth gateway patch failed:", message);
-    return c.json({ error: message }, 502);
-  }
-
-  // 2) Patch succeeded — clear auth profiles/tokens and switch auth mode
-  //    back to platform. (clearTokens() resets llmAuthMode to "platform".)
-  clearAuthProfiles();
-  clearTokens();
-
-  console.log("[sidecar] Codex OAuth deactivated (openai-codex profiles cleared)");
-  return c.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,18 @@ interface PersistedTokens {
 }
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let transitionQueue: Promise<void> = Promise.resolve();
+
+export function withCodexOAuthTransition<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  const run = transitionQueue.then(operation, operation);
+  transitionQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 function persistTokens(tokens: PersistedTokens): void {
   try {
