@@ -1,6 +1,6 @@
 import { unlink, readdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { BACKUP_DEFAULTS } from "../backup-contract.js";
+import { BACKUP_DEFAULTS, type BackupMetadata } from "../backup-contract.js";
 import { restartGateway } from "./workspace-files.js";
 import { STATE_DIR as DATA_DIR } from "../lib/state-dir.js";
 
@@ -46,13 +46,30 @@ async function runCommand(cmd: string[], timeoutMs = 60_000): Promise<{ exitCode
   return { exitCode, stdout, stderr };
 }
 
+/**
+ * Builds a BackupMetadata object for the current DATA_DIR.
+ * "v0" = legacy /data layout; "v1" = native state root layout.
+ */
+function buildBackupMetadata(backupId: string): BackupMetadata {
+  const stateRootVersion =
+    DATA_DIR === BACKUP_DEFAULTS.legacyStateRoot ? "v0" : "v1";
+  return {
+    stateRoot: DATA_DIR,
+    stateRootVersion,
+    createdAt: new Date().toISOString(),
+    backupId,
+  };
+}
+
 export async function createBackupTarball(backupId: string): Promise<{
   path: string;
   sizeBytes: number;
   checksumSha256: string;
   fileCount: number;
+  metadata: BackupMetadata;
 }> {
   const tarPath = `${DATA_DIR}/.backup-${backupId}.tar.gz`;
+  const metadata = buildBackupMetadata(backupId);
   const excludeArgs = [
     ...BACKUP_DEFAULTS.excludeDirs.map((d) => `--exclude=${d}`),
     "--exclude=*.sock",
@@ -87,7 +104,7 @@ export async function createBackupTarball(backupId: string): Promise<{
   const { stdout: listOut } = await runCommand(["tar", "-tzf", tarPath]);
   const fileCount = listOut.split("\n").filter(Boolean).length;
 
-  return { path: tarPath, sizeBytes, checksumSha256, fileCount };
+  return { path: tarPath, sizeBytes, checksumSha256, fileCount, metadata };
 }
 
 export async function uploadBackup(filePath: string, uploadUrl: string): Promise<void> {

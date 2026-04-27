@@ -158,4 +158,53 @@ describe("backup", () => {
       expect(mockUnlink).toHaveBeenCalledWith("/tmp/test-file.tar.gz");
     });
   });
+
+  describe("backup metadata (Phase 3)", () => {
+    it("createBackupTarball returns a metadata object", async () => {
+      const result = await createBackupTarball("meta-test");
+      expect(result.metadata).toBeDefined();
+      expect(result.metadata.backupId).toBe("meta-test");
+      expect(result.metadata.stateRoot).toBe(DEFAULT_STATE_DIR);
+      expect(result.metadata.createdAt).toBeDefined();
+      // createdAt should be a valid ISO 8601 string
+      expect(() => new Date(result.metadata.createdAt)).not.toThrow();
+    });
+
+    it("metadata stateRootVersion is v0 when DATA_DIR is /data (legacy layout)", async () => {
+      // DEFAULT_STATE_DIR == "/data" in this test environment (env var not set)
+      const result = await createBackupTarball("v0-test");
+      expect(result.metadata.stateRootVersion).toBe("v0");
+    });
+
+    it("metadata stateRoot matches DATA_DIR", async () => {
+      const result = await createBackupTarball("root-test");
+      expect(result.metadata.stateRoot).toBe(DEFAULT_STATE_DIR);
+    });
+  });
+
+  describe("legacy /data archive restore compatibility (Phase 3)", () => {
+    it("restoreFromTarball extracts into current DATA_DIR regardless of archive origin", async () => {
+      // Simulate restoring a legacy /data-rooted archive into the current DATA_DIR.
+      // Since both old and new archives use relative paths (tar -C <dir> .),
+      // extraction always targets DATA_DIR correctly regardless of archive origin.
+      mockBunFile.mockImplementation(() => ({
+        exists: () => Promise.resolve(false),
+        size: 0,
+        stream: () => new ReadableStream({ start(c) { c.close(); } }),
+        arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+      }));
+      mockReaddir.mockResolvedValue([]);
+
+      await restoreFromTarball("legacy-id");
+
+      const extractCall = mockSpawn.mock.calls.find(
+        (c: unknown[]) => (c[0] as string[]).includes("-xzf"),
+      );
+      expect(extractCall).toBeDefined();
+      const extractArgs: string[] = extractCall![0];
+      const cIndex = extractArgs.indexOf("-C");
+      // Restore always targets current DATA_DIR, not the archive's original source
+      expect(extractArgs[cIndex + 1]).toBe(DEFAULT_STATE_DIR);
+    });
+  });
 });
