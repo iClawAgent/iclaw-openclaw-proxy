@@ -517,6 +517,7 @@ adminRouter.post("/admin/backup", async (c) => {
       checksumSha256: tarResult.checksumSha256,
       fileCount: tarResult.fileCount,
       durationMs: Date.now() - startTime,
+      metadata: tarResult.metadata,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "backup_failed";

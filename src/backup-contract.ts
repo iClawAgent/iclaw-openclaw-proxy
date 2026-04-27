@@ -40,6 +40,7 @@ export interface SidecarBackupResponse {
   checksumSha256: string;
   fileCount: number;
   durationMs: number;
+  metadata?: BackupMetadata;
 }
 
 export interface SidecarRestoreRequest {
