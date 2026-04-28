@@ -338,12 +338,18 @@ describe("bird-skill service", () => {
         expect.objectContaining({ recursive: true }),
       );
 
-      // Wrapper script written at the canonical absolute path
+      // Wrapper script written at the canonical absolute path and includes
+      // credential fallback so AUTH_TOKEN/CT0 are loaded from credentials.json
+      // when not already in the environment (e.g. manual shell invocation).
       expect(writeFileSpy).toHaveBeenCalledWith(
         `${binPath}.tmp`,
         expect.stringContaining(`exec ${installPrefix}/node_modules/.bin/bird`),
         expect.objectContaining({ mode: 0o755 }),
       );
+      const wrapperArg = writeFileSpy.mock.calls[0][1] as string;
+      expect(wrapperArg).toContain("AUTH_TOKEN");
+      expect(wrapperArg).toContain("CT0");
+      expect(wrapperArg).toContain("credentials.json");
       expect(renameSpy).toHaveBeenCalledWith(`${binPath}.tmp`, binPath);
 
       // Guaranteed-PATH symlink attempted at /usr/local/bin/bird

@@ -259,8 +259,19 @@ export async function installBirdDependency(): Promise<void> {
     // Write a wrapper shell script (not a symlink) so the binary is always
     // callable via absolute path regardless of PATH env propagation in the
     // skill runner (PATH propagation via skills.update is non-guaranteed in Phase 1).
+    // When AUTH_TOKEN is not already in the environment (e.g. manual shell invocation),
+    // read credentials from the JSON file written by writeBirdCredentials so the
+    // binary always has what it needs regardless of execution context.
     const realBin = `${installPrefix}/node_modules/.bin/bird`;
-    const wrapperContent = `#!/bin/sh\nexec ${realBin} "$@"\n`;
+    const credentialsPath = getBirdCredentialsPath();
+    const wrapperContent = `#!/bin/sh
+if [ -z "$AUTH_TOKEN" ] && [ -f "${credentialsPath}" ]; then
+  AUTH_TOKEN=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).authToken||'')}catch(e){}" 2>/dev/null)
+  CT0=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).ct0||'')}catch(e){}" 2>/dev/null)
+  export AUTH_TOKEN CT0
+fi
+exec ${realBin} "$@"
+`;
     const tmpPath = `${binPath}.tmp`;
     try {
       await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
