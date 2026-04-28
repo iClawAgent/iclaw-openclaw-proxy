@@ -223,6 +223,52 @@ async function ensureBirdOnSystemPath(): Promise<void> {
   }
 }
 
+// ─── Wrapper Script ───────────────────────────────────────────────────────
+
+/**
+ * Write (or overwrite) the bird wrapper script at getBirdBinPath().
+ * Always called on setup so stale wrappers from prior installs are fixed.
+ */
+async function writeBirdWrapper(): Promise<void> {
+  const installPrefix = getBirdInstallPrefix();
+  const binPath = getBirdBinPath();
+  const realBin = `${installPrefix}/node_modules/.bin/bird`;
+  const credentialsPath = getBirdCredentialsPath();
+
+  try {
+    await fs.mkdir(`${installPrefix}/bin`, { mode: 0o755, recursive: true });
+  } catch (err) {
+    if ((err as any).code === "EACCES") {
+      throw new Error("bird_persistent_path_unavailable");
+    }
+    throw err;
+  }
+
+  // When AUTH_TOKEN is not already in the environment (e.g. manual shell invocation),
+  // read credentials from the JSON file written by writeBirdCredentials so the
+  // binary always has what it needs regardless of execution context.
+  const wrapperContent = `#!/bin/sh
+if [ -z "$AUTH_TOKEN" ] && [ -f "${credentialsPath}" ]; then
+  AUTH_TOKEN=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).authToken||'')}catch(e){}" 2>/dev/null)
+  CT0=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).ct0||'')}catch(e){}" 2>/dev/null)
+  export AUTH_TOKEN CT0
+fi
+exec ${realBin} "$@"
+`;
+  const tmpPath = `${binPath}.tmp`;
+  try {
+    await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
+    await fs.rename(tmpPath, binPath);
+  } catch (err) {
+    if ((err as any).code === "EACCES") {
+      throw new Error("bird_persistent_path_unavailable");
+    }
+    throw new Error(
+      `Failed to write bird wrapper: ${err instanceof Error ? err.message : "unknown"}`,
+    );
+  }
+}
+
 // ─── Dependency Installation ──────────────────────────────────────────────
 
 /**
@@ -256,36 +302,7 @@ export async function installBirdDependency(): Promise<void> {
       throw err;
     }
 
-    // Write a wrapper shell script (not a symlink) so the binary is always
-    // callable via absolute path regardless of PATH env propagation in the
-    // skill runner (PATH propagation via skills.update is non-guaranteed in Phase 1).
-    // When AUTH_TOKEN is not already in the environment (e.g. manual shell invocation),
-    // read credentials from the JSON file written by writeBirdCredentials so the
-    // binary always has what it needs regardless of execution context.
-    const realBin = `${installPrefix}/node_modules/.bin/bird`;
-    const credentialsPath = getBirdCredentialsPath();
-    const wrapperContent = `#!/bin/sh
-if [ -z "$AUTH_TOKEN" ] && [ -f "${credentialsPath}" ]; then
-  AUTH_TOKEN=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).authToken||'')}catch(e){}" 2>/dev/null)
-  CT0=$(node -e "try{process.stdout.write(JSON.parse(require('fs').readFileSync('${credentialsPath}','utf8')).ct0||'')}catch(e){}" 2>/dev/null)
-  export AUTH_TOKEN CT0
-fi
-exec ${realBin} "$@"
-`;
-    const tmpPath = `${binPath}.tmp`;
-    try {
-      await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
-      await fs.rename(tmpPath, binPath);
-    } catch (err) {
-      if ((err as any).code === "EACCES") {
-        throw new Error("bird_persistent_path_unavailable");
-      }
-      throw err;
-    }
-
-    // Guaranteed-PATH symlink: fail hard on error. Production containers run as root
-    // so /usr/local/bin is always writable. This ensures `bird` resolves for the
-    // skill runner without relying on skills.update PATH propagation (non-guaranteed).
+    await writeBirdWrapper();
     await ensureBirdOnSystemPath();
   } catch (err) {
     if (err instanceof Error && err.message === "bird_persistent_path_unavailable") {
@@ -332,13 +349,16 @@ export async function setupBirdSkill(
     await verifyBirdSkillContent();
     const installedSkill = true;
 
-    // 3. Check if bird binary exists; install dependency if missing
+    // 3. Check if bird binary exists; install dependency if missing.
+    //    Always rewrite the wrapper so stale wrappers from prior installs are fixed.
     let installedDependency = false;
     const runtimeCheck = await verifyBirdRuntime();
     if (!runtimeCheck.installed) {
       console.log("[sidecar] Installing bird dependency...");
       await installBirdDependency();
       installedDependency = true;
+    } else {
+      await writeBirdWrapper();
     }
     await ensureBirdOnSystemPath();
 
