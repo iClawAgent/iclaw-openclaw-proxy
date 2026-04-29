@@ -389,8 +389,9 @@ describe("gog-skill service", () => {
     it("falls back to runtime download when baked binary is missing", async () => {
       const archiveBytes = Buffer.from("fake gog archive");
       const expectedHash = createHash("sha256").update(archiveBytes).digest("hex");
-      const originalHash = GOG_SHA256.linux_amd64;
-      GOG_SHA256.linux_amd64 = expectedHash;
+      const arch = detectLinuxArch();
+      const originalHash = GOG_SHA256[arch];
+      GOG_SHA256[arch] = expectedHash;
 
       gogBinaryInternals.execFileAsync = vi.fn(async (cmd: string) => {
         if (cmd === "tar") return { stdout: "", stderr: "" };
@@ -411,12 +412,12 @@ describe("gog-skill service", () => {
       try {
         await installGogBinary();
       } finally {
-        GOG_SHA256.linux_amd64 = originalHash;
+        GOG_SHA256[arch] = originalHash;
       }
 
       expect(downloadSpy).toHaveBeenCalledWith(
-        expect.stringContaining("gogcli_0.14.0_linux_amd64.tar.gz"),
-        expect.stringContaining("gogcli_0.14.0_linux_amd64_"),
+        expect.stringContaining(`gogcli_0.14.0_${arch}.tar.gz`),
+        expect.stringContaining(`gogcli_0.14.0_${arch}_`),
       );
     });
   });

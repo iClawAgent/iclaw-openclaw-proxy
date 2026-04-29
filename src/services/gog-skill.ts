@@ -11,7 +11,7 @@ import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
 // Local types — sidecar is a git submodule and MUST NOT import from @iclawagent/shared.
 // Keep in sync with packages/shared/src/types.ts Gog* types manually.
 
-// Phase 2A: "temporary_access_token" active. "service_account" remains out of scope.
+// Gog skill: "temporary_access_token" active. "service_account" remains out of scope.
 export type GogAuthMode = "oauth" | "temporary_access_token";
 export type GogService = "gmail" | "calendar" | "drive" | "contacts" | "docs" | "sheets";
 
