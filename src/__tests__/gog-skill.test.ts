@@ -341,6 +341,67 @@ describe("gog-skill service", () => {
     });
   });
 
+  describe("gogStatus config contract", () => {
+    it("does not report connected when auth works but openclaw config has no gog entry", async () => {
+      mockExecFileAsync.mockReset();
+      vi.spyOn(fs, "readFile").mockImplementation(async (file) => {
+        if (String(file).endsWith("openclaw.json")) {
+          return JSON.stringify({ skills: { entries: {} } }) as any;
+        }
+        return "pw" as any;
+      });
+      mockExecFileAsync.mockResolvedValue({ stdout: `gog version ${GOG_VERSION}`, stderr: "" });
+
+      const status = await gogStatus();
+
+      expect(status).toMatchObject({
+        installed: true,
+        connected: false,
+        missing: { config: ["gog_skill_not_enabled"] },
+      });
+    });
+
+    it("does not report connected when gog auth list exits successfully but has no tokens", async () => {
+      mockExecFileAsync.mockReset();
+      vi.spyOn(fs, "readFile").mockImplementation(async (file) => {
+        if (String(file).endsWith("openclaw.json")) {
+          return JSON.stringify({
+            skills: { entries: { gog: { enabled: true } } },
+          }) as any;
+        }
+        return "pw" as any;
+      });
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "No tokens stored", stderr: "" });
+
+      const status = await gogStatus();
+
+      expect(status).toMatchObject({
+        installed: true,
+        connected: false,
+        missing: { credentials: ["gog_tokens_missing"] },
+      });
+    });
+
+    it("reports connected only when auth works and openclaw config enables gog", async () => {
+      mockExecFileAsync.mockReset();
+      vi.spyOn(fs, "readFile").mockImplementation(async (file) => {
+        if (String(file).endsWith("openclaw.json")) {
+          return JSON.stringify({
+            skills: { entries: { gog: { enabled: true } } },
+          }) as any;
+        }
+        return "pw" as any;
+      });
+      mockExecFileAsync.mockResolvedValue({ stdout: "user@example.com", stderr: "" });
+
+      const status = await gogStatus();
+
+      expect(status).toMatchObject({ installed: true, connected: true });
+    });
+  });
+
   // ─── checksum mismatch deletes temp artifact ──────────────────────────────
 
   describe("Phase 3 baked binary install", () => {

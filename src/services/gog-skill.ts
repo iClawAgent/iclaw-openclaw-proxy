@@ -521,6 +521,28 @@ function buildUpdateSkillEnv(accountEmail: string): Record<string, string> {
   };
 }
 
+function getOpenclawConfigPath(): string {
+  return process.env.OPENCLAW_CONFIG_PATH ?? path.posix.join(getStateDir(), "openclaw.json");
+}
+
+async function isGogSkillEnabledInConfig(): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(getOpenclawConfigPath(), "utf-8");
+    const cfg = JSON.parse(raw) as {
+      skills?: { entries?: Record<string, { enabled?: boolean }> };
+    };
+    return cfg.skills?.entries?.[GOG_CLAWHUB_SLUG]?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function authListShowsStoredCredentials(stdout: string, stderr: string): boolean {
+  const output = `${stdout}\n${stderr}`.trim();
+  if (!output) return false;
+  return !/no\s+tokens?\s+stored/i.test(output);
+}
+
 // ─── Services Array to CLI Flags ─────────────────────────────────────────────
 
 function servicesToCliArg(services: GogService[]): string {
@@ -646,10 +668,25 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
     const gogEnv = await getGogEnv();
     const realBin = getGogRealBinPath();
     try {
-      await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+      const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
         env: gogEnv,
         timeout: 15_000,
       });
+      if (!authListShowsStoredCredentials(stdout, stderr)) {
+        events.push({
+          action: "gog_auth_check_failed",
+          status: "failed",
+          errorCode: "gog_tokens_missing",
+        });
+        return {
+          ok: false,
+          status: "failed",
+          accountEmail: req.accountEmail,
+          authMode: req.authMode,
+          message: "gog_tokens_missing",
+          events,
+        };
+      }
     } catch {
       let doctorSummary: string | undefined;
       let doctorErrorCode: string | undefined;
@@ -781,10 +818,23 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
 
     // Verify auth
     try {
-      await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+      const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
         env: gogEnv,
         timeout: 15_000,
       });
+      if (!authListShowsStoredCredentials(stdout, stderr)) {
+        events.push({
+          action: "gog_auth_check_failed",
+          status: "failed",
+          errorCode: "gog_tokens_missing",
+        });
+        return {
+          ok: false,
+          status: "failed",
+          message: "gog_tokens_missing",
+          events,
+        };
+      }
     } catch {
       // Run auth doctor for diagnostics
       let doctorSummary: string | undefined;
@@ -881,10 +931,24 @@ export async function gogStatus(): Promise<GogStatusResponse> {
 
   const gogEnv = await getGogEnv();
   try {
-    await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+    const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
       env: gogEnv,
       timeout: 15_000,
     });
+    if (!authListShowsStoredCredentials(stdout, stderr)) {
+      return {
+        installed: true,
+        connected: false,
+        missing: { credentials: ["gog_tokens_missing"] },
+      };
+    }
+    if (!(await isGogSkillEnabledInConfig())) {
+      return {
+        installed: true,
+        connected: false,
+        missing: { config: ["gog_skill_not_enabled"] },
+      };
+    }
     return { installed: true, connected: true };
   } catch {
     // Run auth doctor for diagnostics on auth check failure
