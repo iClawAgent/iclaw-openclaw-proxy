@@ -46,6 +46,16 @@ import {
   getGatewayStatus,
 } from "../services/workspace-files.js";
 import { setupBirdSkill, redactBirdSecrets, type BirdSetupRequest, type BirdSetupResponse } from "../services/bird-skill.js";
+import {
+  setupGog,
+  gogOauthStart,
+  gogOauthComplete,
+  gogStatus,
+  gogDisconnect,
+  type GogSetupRequest,
+  type GogOauthCompleteRequest,
+  type GogDisconnectRequest,
+} from "../services/gog-skill.js";
 
 export const adminRouter = new Hono();
 
@@ -567,6 +577,91 @@ adminRouter.post("/admin/restore", async (c) => {
     const message = err instanceof Error ? err.message : "restore_failed";
     console.error("[sidecar] restore failed:", message);
     return c.json({ error: message }, 502);
+  }
+});
+
+// ─── POST /admin/skills/gog/setup ────────────────────────────────────────────
+
+adminRouter.post("/admin/skills/gog/setup", async (c) => {
+  const body = await c.req.json<GogSetupRequest>();
+  if (!body.accountEmail || !body.authMode || !Array.isArray(body.services) || body.services.length === 0) {
+    return c.json({ error: "accountEmail, authMode, and services are required" }, 400);
+  }
+  try {
+    const result = await setupGog(body);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_setup_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog setup failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── GET /admin/skills/gog/status ─────────────────────────────────────────────
+
+adminRouter.get("/admin/skills/gog/status", async (c) => {
+  try {
+    const result = await gogStatus();
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_status_failed";
+    console.error("[sidecar] gog status failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── DELETE /admin/skills/gog/disconnect ──────────────────────────────────────
+
+adminRouter.delete("/admin/skills/gog/disconnect", async (c) => {
+  const body = await c.req.json<GogDisconnectRequest>();
+  if (!body.accountEmail) {
+    return c.json({ error: "accountEmail is required" }, 400);
+  }
+  try {
+    const result = await gogDisconnect(body.accountEmail);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_disconnect_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog disconnect failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── POST /admin/skills/gog/oauth/start ───────────────────────────────────────
+
+adminRouter.post("/admin/skills/gog/oauth/start", async (c) => {
+  const body = await c.req.json<{ accountEmail: string }>();
+  if (!body.accountEmail) {
+    return c.json({ error: "accountEmail is required" }, 400);
+  }
+  try {
+    const result = await gogOauthStart(body.accountEmail);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_oauth_start_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog oauth/start failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── POST /admin/skills/gog/oauth/complete ────────────────────────────────────
+
+adminRouter.post("/admin/skills/gog/oauth/complete", async (c) => {
+  const body = await c.req.json<GogOauthCompleteRequest>();
+  if (!body.accountEmail || !body.redirectUrl) {
+    return c.json({ error: "accountEmail and redirectUrl are required" }, 400);
+  }
+  try {
+    const result = await gogOauthComplete(body);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_oauth_complete_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog oauth/complete failed:", code);
+    return c.json({ error: code }, 502);
   }
 });
 
