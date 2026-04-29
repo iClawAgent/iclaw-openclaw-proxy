@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -28,7 +29,9 @@ vi.stubEnv("OPENCLAW_STATE_DIR", "/test-state");
 import {
   GOG_VERSION,
   GOG_SHA256,
+  BAKED_GOG_REAL_BIN_PATH,
   gogArtifactUrl,
+  gogBinaryInternals,
   detectLinuxArch,
   parseAuthorizationUrl,
   getGogRealBinPath,
@@ -36,6 +39,7 @@ import {
   getGogKeyringPasswordPath,
   getGogConfigHome,
   getGogEnv,
+  installGogBinary,
   setupGog,
   gogOauthStart,
   gogOauthComplete,
@@ -93,6 +97,19 @@ describe("gog-skill service", () => {
       expect(url).toContain("linux_arm64");
       expect(url).toContain(GOG_VERSION);
       expect(url).toContain("steipete/gogcli");
+    });
+
+    it("Dockerfile gog pin matches sidecar runtime constants", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      expect(dockerfile).toContain(`ARG GOG_VERSION=${GOG_VERSION}`);
+      expect(dockerfile).toContain(GOG_SHA256.linux_amd64);
+      expect(dockerfile).toContain(GOG_SHA256.linux_arm64);
+      expect(dockerfile).toContain("/usr/local/bin/gog-real");
     });
   });
 
@@ -325,6 +342,84 @@ describe("gog-skill service", () => {
   });
 
   // ─── checksum mismatch deletes temp artifact ──────────────────────────────
+
+  describe("Phase 3 baked binary install", () => {
+    it("setup detects baked /usr/local/bin/gog-real and skips download", async () => {
+      gogBinaryInternals.execFileAsync = vi.fn(async (cmd: string) => {
+        if (cmd === BAKED_GOG_REAL_BIN_PATH) return { stdout: `gog version ${GOG_VERSION}`, stderr: "" };
+        throw new Error("not installed");
+      }) as any;
+      gogBinaryInternals.downloadToFile = vi.fn().mockResolvedValue(undefined) as any;
+      vi.spyOn(fs, "readFile").mockResolvedValue("existing-password" as any);
+      vi.spyOn(fs, "access").mockImplementation(async (target) => {
+        if (String(target).includes("keyring.password")) throw new Error("missing");
+        return undefined;
+      });
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      const copySpy = vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      const chmodSpy = vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      const writeSpy = vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+
+      const events = await installGogBinary();
+
+      expect(gogBinaryInternals.downloadToFile).not.toHaveBeenCalled();
+      expect(copySpy).toHaveBeenCalledWith(
+        BAKED_GOG_REAL_BIN_PATH,
+        "/test-state/.iclaw/gog/bin/gog-real",
+      );
+      expect(chmodSpy).toHaveBeenCalledWith("/test-state/.iclaw/gog/bin/gog-real", 0o755);
+      expect(chmodSpy).toHaveBeenCalledWith("/test-state/.iclaw/bin/gog", 0o755);
+      expect(chmodSpy).toHaveBeenCalledWith("/test-state/.iclaw/gog/secrets/keyring.password", 0o600);
+
+      const wrapperWrite = writeSpy.mock.calls.find((call) => String(call[0]).endsWith("/.iclaw/bin/gog.tmp"));
+      expect(wrapperWrite).toBeDefined();
+      expect(String(wrapperWrite?.[1])).toContain("GOG_KEYRING_BACKEND=file");
+      expect(String(wrapperWrite?.[1])).toContain("/test-state/.iclaw/gog/bin/gog-real");
+      expect(String(wrapperWrite?.[1])).not.toContain("$OPENCLAW_STATE_DIR");
+
+      expect(events).toEqual([
+        expect.objectContaining({
+          action: "gog_binary_install_skipped",
+          status: "success",
+        }),
+      ]);
+    });
+
+    it("falls back to runtime download when baked binary is missing", async () => {
+      const archiveBytes = Buffer.from("fake gog archive");
+      const expectedHash = createHash("sha256").update(archiveBytes).digest("hex");
+      const originalHash = GOG_SHA256.linux_amd64;
+      GOG_SHA256.linux_amd64 = expectedHash;
+
+      gogBinaryInternals.execFileAsync = vi.fn(async (cmd: string) => {
+        if (cmd === "tar") return { stdout: "", stderr: "" };
+        throw new Error("not installed");
+      }) as any;
+      const downloadSpy = vi.fn().mockResolvedValue(undefined);
+      gogBinaryInternals.downloadToFile = downloadSpy as any;
+      vi.spyOn(fs, "readFile").mockResolvedValue(archiveBytes as any);
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "unlink").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rm").mockResolvedValue(undefined as any);
+
+      try {
+        await installGogBinary();
+      } finally {
+        GOG_SHA256.linux_amd64 = originalHash;
+      }
+
+      expect(downloadSpy).toHaveBeenCalledWith(
+        expect.stringContaining("gogcli_0.14.0_linux_amd64.tar.gz"),
+        expect.stringContaining("gogcli_0.14.0_linux_amd64_"),
+      );
+    });
+  });
 
   describe("installGogBinary checksum mismatch", () => {
     it("rejects with gog_binary_install_failed on checksum mismatch", async () => {

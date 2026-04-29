@@ -101,6 +101,7 @@ export interface GogDisconnectResponse {
 // 5. Deploy and verify with: gog --version on a running instance.
 export const GOG_VERSION = "0.14.0";
 export const GOG_CLAWHUB_SLUG = "gog";
+export const BAKED_GOG_REAL_BIN_PATH = "/usr/local/bin/gog-real";
 
 /** SHA256 hashes per architecture for gogcli_0.14.0_linux_{arch}.tar.gz */
 export const GOG_SHA256: Record<string, string> = {
@@ -185,42 +186,42 @@ async function ensureStateDir(): Promise<string> {
 
 /** Real gogcli binary extracted from tarball */
 export function getGogRealBinPath(): string {
-  return path.join(getStateDir(), ".iclaw/gog/bin/gog-real");
+  return path.posix.join(getStateDir(), ".iclaw/gog/bin/gog-real");
 }
 
 /** Wrapper script exposed to OpenClaw skill execution */
 export function getGogWrapperPath(): string {
-  return path.join(getStateDir(), ".iclaw/bin/gog");
+  return path.posix.join(getStateDir(), ".iclaw/bin/gog");
 }
 
 /** XDG_CONFIG_HOME override for gog — keeps config under persistent state */
 export function getGogConfigHome(): string {
-  return path.join(getStateDir(), ".iclaw/gog/config");
+  return path.posix.join(getStateDir(), ".iclaw/gog/config");
 }
 
 /** Keyring password file path */
 export function getGogKeyringPasswordPath(): string {
-  return path.join(getStateDir(), ".iclaw/gog/secrets/keyring.password");
+  return path.posix.join(getStateDir(), ".iclaw/gog/secrets/keyring.password");
 }
 
 /** Per-account credential directory */
 export function getGogCredentialDir(accountEmail: string): string {
-  return path.join(getStateDir(), `.iclaw/gog/credentials/${accountEmail}`);
+  return path.posix.join(getStateDir(), `.iclaw/gog/credentials/${accountEmail}`);
 }
 
 /** Per-account profile directory */
 export function getGogProfileDir(accountEmail: string): string {
-  return path.join(getStateDir(), `.iclaw/gog/profiles/${accountEmail}`);
+  return path.posix.join(getStateDir(), `.iclaw/gog/profiles/${accountEmail}`);
 }
 
 /** Per-account service-account key path */
 export function getGogServiceAccountPath(accountEmail: string): string {
-  return path.join(getStateDir(), `.iclaw/gog/service-accounts/${accountEmail}.json`);
+  return path.posix.join(getStateDir(), `.iclaw/gog/service-accounts/${accountEmail}.json`);
 }
 
 /** Per-account temp token path */
 export function getGogTempPath(accountEmail: string): string {
-  return path.join(getStateDir(), `.iclaw/gog/temp/${accountEmail}.token`);
+  return path.posix.join(getStateDir(), `.iclaw/gog/temp/${accountEmail}.token`);
 }
 
 // ─── Env Builder ──────────────────────────────────────────────────────────────
@@ -246,7 +247,7 @@ export async function getGogEnv(): Promise<Record<string, string>> {
     GOG_KEYRING_PASSWORD: keyringPassword,
     XDG_CONFIG_HOME: getGogConfigHome(),
     // Prepend gog bin dir so gog-real can resolve helpers if any
-    PATH: `${path.dirname(getGogRealBinPath())}:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+    PATH: `${path.posix.dirname(getGogRealBinPath())}:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
   };
 }
 
@@ -293,6 +294,11 @@ function downloadToFile(url: string, dest: string): Promise<void> {
 
 // ─── Binary Install ───────────────────────────────────────────────────────────
 
+export const gogBinaryInternals = {
+  downloadToFile,
+  execFileAsync,
+};
+
 /**
  * Install gogcli v{GOG_VERSION} binary idempotently.
  * Returns events describing what happened.
@@ -300,21 +306,44 @@ function downloadToFile(url: string, dest: string): Promise<void> {
 export async function installGogBinary(): Promise<GogSidecarEvent[]> {
   const events: GogSidecarEvent[] = [];
   const realBinPath = getGogRealBinPath();
-  const wrapperPath = getGogWrapperPath();
-
   // Check if correct version already installed
   try {
     const gogEnv = await getGogEnv();
-    const { stdout } = await execFileAsync(realBinPath, ["--version"], {
+    const { stdout } = await gogBinaryInternals.execFileAsync(realBinPath, ["--version"], {
       timeout: 5_000,
       env: gogEnv,
     });
     if (stdout.trim().includes(GOG_VERSION)) {
+      await ensureKeyringPassword();
+      await writeGogWrapper();
       events.push({ action: "gog_binary_install_skipped", status: "success", message: `gog v${GOG_VERSION} already installed` });
       return events;
     }
   } catch {
     // not installed or wrong version — continue
+  }
+  let bakedVersionOutput: string | undefined;
+  try {
+    const { stdout } = await gogBinaryInternals.execFileAsync(BAKED_GOG_REAL_BIN_PATH, ["--version"], {
+      timeout: 5_000,
+    });
+    bakedVersionOutput = stdout;
+  } catch {
+    // baked binary missing or wrong version - fall back to runtime install
+  }
+  if (bakedVersionOutput?.trim().includes(GOG_VERSION)) {
+    const realBinDir = path.posix.dirname(realBinPath);
+    await fs.mkdir(realBinDir, { recursive: true, mode: 0o700 });
+    await fs.copyFile(BAKED_GOG_REAL_BIN_PATH, realBinPath);
+    await fs.chmod(realBinPath, 0o755);
+    await ensureKeyringPassword();
+    await writeGogWrapper();
+    events.push({
+      action: "gog_binary_install_skipped",
+      status: "success",
+      message: `gog v${GOG_VERSION} copied from baked image binary`,
+    });
+    return events;
   }
 
   // Detect arch
@@ -331,7 +360,7 @@ export async function installGogBinary(): Promise<GogSidecarEvent[]> {
 
   try {
     // Download
-    await downloadToFile(url, tmpTar);
+    await gogBinaryInternals.downloadToFile(url, tmpTar);
 
     // Verify SHA256
     const actualHash = await sha256File(tmpTar);
@@ -343,13 +372,13 @@ export async function installGogBinary(): Promise<GogSidecarEvent[]> {
 
     // Extract
     await fs.mkdir(tmpExtractDir, { recursive: true });
-    await execFileAsync("tar", ["-xzf", tmpTar, "-C", tmpExtractDir], { timeout: 30_000 });
+    await gogBinaryInternals.execFileAsync("tar", ["-xzf", tmpTar, "-C", tmpExtractDir], { timeout: 30_000 });
 
     const extractedBin = path.join(tmpExtractDir, "gog");
     await fs.access(extractedBin);
 
     // Install real binary
-    const realBinDir = path.dirname(realBinPath);
+    const realBinDir = path.posix.dirname(realBinPath);
     await fs.mkdir(realBinDir, { recursive: true, mode: 0o700 });
     await fs.copyFile(extractedBin, realBinPath);
     await fs.chmod(realBinPath, 0o755);
@@ -383,7 +412,7 @@ async function ensureKeyringPassword(): Promise<void> {
   } catch {
     // generate new password
   }
-  const secretsDir = path.dirname(passwordPath);
+  const secretsDir = path.posix.dirname(passwordPath);
   await fs.mkdir(secretsDir, { recursive: true, mode: 0o700 });
   const password = randomBytes(32).toString("hex");
   const tmpPath = `${passwordPath}.tmp`;
@@ -401,7 +430,7 @@ async function writeGogWrapper(): Promise<void> {
   const keyringPasswordPath = getGogKeyringPasswordPath();
   const configHome = getGogConfigHome();
 
-  const wrapperDir = path.dirname(wrapperPath);
+  const wrapperDir = path.posix.dirname(wrapperPath);
   await fs.mkdir(wrapperDir, { recursive: true, mode: 0o755 });
 
   // Use literal paths (no shell variables) in wrapper for maximum reliability.
@@ -423,7 +452,7 @@ exec ${realBinPath} "$@"
 async function writeOauthClientJson(accountEmail: string, clientJson: unknown): Promise<string> {
   const credDir = getGogCredentialDir(accountEmail);
   await fs.mkdir(credDir, { recursive: true, mode: 0o700 });
-  const clientPath = path.join(credDir, "client.json");
+  const clientPath = path.posix.join(credDir, "client.json");
   const tmpPath = `${clientPath}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify(clientJson), { mode: 0o600 });
   await fs.rename(tmpPath, clientPath);
@@ -432,7 +461,7 @@ async function writeOauthClientJson(accountEmail: string, clientJson: unknown): 
 }
 
 async function writeTempToken(accountEmail: string, token: string): Promise<void> {
-  const tempDir = path.join(getStateDir(), ".iclaw/gog/temp");
+  const tempDir = path.posix.join(getStateDir(), ".iclaw/gog/temp");
   await fs.mkdir(tempDir, { recursive: true, mode: 0o700 });
   const tokenPath = getGogTempPath(accountEmail);
   const tmpPath = `${tokenPath}.tmp`;
@@ -475,8 +504,8 @@ export function validateOauthClientJson(clientJson: unknown): void {
 
 function buildUpdateSkillEnv(accountEmail: string): Record<string, string> {
   const stateDir = getStateDir();
-  const gogBinDir = path.join(stateDir, ".iclaw/bin");
-  const gogConfigHome = path.join(stateDir, ".iclaw/gog/config");
+  const gogBinDir = path.posix.join(stateDir, ".iclaw/bin");
+  const gogConfigHome = path.posix.join(stateDir, ".iclaw/gog/config");
   const basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
   return {
@@ -520,8 +549,28 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
     await installSkillFromClawHub(GOG_CLAWHUB_SLUG);
 
     // Step 2: Install binary
-    const binaryEvents = await installGogBinary();
-    events.push(...binaryEvents);
+    try {
+      const binaryEvents = await installGogBinary();
+      events.push(...binaryEvents);
+    } catch (err) {
+      if (err instanceof Error && err.message === "needs_image_upgrade") {
+        events.push({
+          action: "gog_needs_image_upgrade",
+          status: "failed",
+          message: "Setup will be available after your runtime is updated",
+          errorCode: "needs_image_upgrade",
+        });
+        return {
+          ok: false,
+          status: "needs_image_upgrade",
+          accountEmail: req.accountEmail,
+          authMode: req.authMode,
+          message: "Setup will be available after your runtime is updated",
+          events,
+        };
+      }
+      throw err;
+    }
 
     // Step 3: Write credential files
     if (req.authMode === "oauth") {
@@ -534,7 +583,7 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
 
     // Step 4: For OAuth mode — run step 1 and return pending_oauth
     if (req.authMode === "oauth") {
-      const clientPath = path.join(getGogCredentialDir(req.accountEmail), "client.json");
+      const clientPath = path.posix.join(getGogCredentialDir(req.accountEmail), "client.json");
       const gogEnv = await getGogEnv();
       const realBin = getGogRealBinPath();
 
@@ -862,7 +911,7 @@ export async function gogDisconnect(accountEmail: string): Promise<GogDisconnect
     const profileDir = getGogProfileDir(accountEmail);
     const serviceAccountPath = getGogServiceAccountPath(accountEmail);
     const tempPath = getGogTempPath(accountEmail);
-    const envPath = path.join(getStateDir(), `.iclaw/gog/env/${accountEmail}.env`);
+    const envPath = path.posix.join(getStateDir(), `.iclaw/gog/env/${accountEmail}.env`);
 
     await fs.rm(credDir, { recursive: true, force: true });
     await fs.rm(profileDir, { recursive: true, force: true });
