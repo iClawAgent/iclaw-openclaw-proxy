@@ -811,7 +811,13 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
         env: gogEnv,
         timeout: 30_000,
       });
-    } catch {
+    } catch (err: unknown) {
+      const execErr = err as { stderr?: string; stdout?: string; code?: number | string };
+      console.error("[gog] auth add --step 2 failed", {
+        code: execErr?.code,
+        stderr: execErr?.stderr?.slice(0, 500),
+        stdout: execErr?.stdout?.slice(0, 500),
+      });
       events.push({ action: "gog_auth_check_failed", status: "failed" });
       return { ok: false, status: "failed", message: "gog_auth_check_failed", events };
     }
