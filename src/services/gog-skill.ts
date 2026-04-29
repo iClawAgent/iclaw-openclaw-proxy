@@ -11,7 +11,8 @@ import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
 // Local types — sidecar is a git submodule and MUST NOT import from @iclawagent/shared.
 // Keep in sync with packages/shared/src/types.ts Gog* types manually.
 
-export type GogAuthMode = "oauth" | "service_account" | "temporary_access_token";
+// Phase 2A: "temporary_access_token" active. "service_account" remains out of scope.
+export type GogAuthMode = "oauth" | "temporary_access_token";
 export type GogService = "gmail" | "calendar" | "drive" | "contacts" | "docs" | "sheets";
 
 const DEFAULT_SERVICES: GogService[] = ["gmail", "calendar", "drive", "contacts", "docs", "sheets"];
@@ -91,6 +92,13 @@ export interface GogDisconnectResponse {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+// To update the pinned gogcli version:
+// 1. Download the new release checksums from:
+//    https://github.com/steipete/gogcli/releases/download/v{NEW_VERSION}/checksums.txt
+// 2. Update GOG_VERSION to the new version string.
+// 3. Update GOG_SHA256 with the SHA256 values for linux_amd64 and linux_arm64 from checksums.txt.
+// 4. Run: pnpm --dir iclawagent-app vitest run packages/iclaw-openclaw-proxy/src/__tests__/gog-skill.test.ts
+// 5. Deploy and verify with: gog --version on a running instance.
 export const GOG_VERSION = "0.14.0";
 export const GOG_CLAWHUB_SLUG = "gog";
 
@@ -594,13 +602,27 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
         timeout: 15_000,
       });
     } catch {
-      events.push({ action: "gog_auth_check_failed", status: "failed" });
+      let doctorSummary: string | undefined;
+      let doctorErrorCode: string | undefined;
+      try {
+        const { summary, errorCode } = await runAuthDoctor(gogEnv);
+        doctorSummary = summary || undefined;
+        doctorErrorCode = errorCode;
+      } catch {
+        // best-effort
+      }
+      events.push({
+        action: "gog_auth_check_failed",
+        status: "failed",
+        message: doctorSummary,
+        errorCode: doctorErrorCode,
+      });
       return {
         ok: false,
         status: "failed",
         accountEmail: req.accountEmail,
         authMode: req.authMode,
-        message: "gog_auth_check_failed",
+        message: doctorErrorCode ?? "gog_auth_check_failed",
         events,
       };
     }
@@ -715,8 +737,28 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
         timeout: 15_000,
       });
     } catch {
-      events.push({ action: "gog_auth_check_failed", status: "failed" });
-      return { ok: false, status: "failed", message: "gog_auth_check_failed", events };
+      // Run auth doctor for diagnostics
+      let doctorSummary: string | undefined;
+      let doctorErrorCode: string | undefined;
+      try {
+        const { summary, errorCode } = await runAuthDoctor(gogEnv);
+        doctorSummary = summary || undefined;
+        doctorErrorCode = errorCode;
+      } catch {
+        // best-effort
+      }
+      events.push({
+        action: "gog_auth_check_failed",
+        status: "failed",
+        message: doctorSummary,
+        errorCode: doctorErrorCode,
+      });
+      return {
+        ok: false,
+        status: "failed",
+        message: doctorErrorCode ?? "gog_auth_check_failed",
+        events,
+      };
     }
 
     pendingOauthState.delete(req.accountEmail);
@@ -732,6 +774,41 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
 
     return { ok: true, status: "connected", events };
   });
+}
+
+// ─── Auth Doctor Diagnostic ───────────────────────────────────────────────────
+
+const KEYRING_INTEGRITY_RE = /aes\.KeyUnwrap\(\): integrity check failed/i;
+const MAX_DOCTOR_OUTPUT_CHARS = 500;
+
+/**
+ * Run `gog-real auth doctor --check` and return a redacted diagnostic summary.
+ * Never logs keyring passwords. Returns errorCode "keyring_integrity_failed" if
+ * the keyring is corrupt. Throws on binary exec failure.
+ */
+export async function runAuthDoctor(gogEnv: Record<string, string>): Promise<{
+  summary: string;
+  errorCode: string | undefined;
+}> {
+  const realBin = getGogRealBinPath();
+  let output = "";
+  try {
+    const { stdout } = await execFileAsync(realBin, ["auth", "doctor", "--check"], {
+      env: gogEnv,
+      timeout: 15_000,
+    });
+    output = stdout;
+  } catch (err) {
+    // stderr may contain diagnostic info; combine if present
+    output = err instanceof Error ? err.message : String(err);
+  }
+
+  // Redact anything that looks like a password or key value
+  const redacted = output.replace(/password[^\s]*/gi, "[redacted]").replace(/GOG_KEYRING_PASSWORD[^\s]*/gi, "[redacted]");
+  const summary = redacted.slice(0, MAX_DOCTOR_OUTPUT_CHARS);
+  const errorCode = KEYRING_INTEGRITY_RE.test(output) ? "keyring_integrity_failed" : undefined;
+
+  return { summary, errorCode };
 }
 
 // ─── Status ───────────────────────────────────────────────────────────────────
@@ -761,6 +838,15 @@ export async function gogStatus(): Promise<GogStatusResponse> {
     });
     return { installed: true, connected: true };
   } catch {
+    // Run auth doctor for diagnostics on auth check failure
+    try {
+      const { errorCode } = await runAuthDoctor(gogEnv);
+      if (errorCode) {
+        return { installed: true, connected: false, missing: { credentials: [errorCode] } };
+      }
+    } catch {
+      // best-effort — ignore doctor failure
+    }
     return { installed: true, connected: false };
   }
 }
