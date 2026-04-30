@@ -15,7 +15,7 @@ import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
 export type GogAuthMode = "oauth" | "temporary_access_token";
 export type GogService = "gmail" | "calendar" | "drive" | "contacts" | "docs" | "sheets";
 
-const DEFAULT_SERVICES: GogService[] = ["gmail", "calendar", "drive", "contacts", "docs", "sheets"];
+const DEFAULT_SERVICES: GogService[] = ["gmail", "calendar", "drive", "contacts", "sheets", "docs"];
 
 export interface GogSetupRequest {
   accountEmail: string;
@@ -54,6 +54,7 @@ export interface GogStatusResponse {
   missing?: {
     bins?: string[];
     credentials?: string[];
+    config?: string[];
   };
 }
 
@@ -616,13 +617,11 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
       });
 
       const serviceArg = servicesToCliArg(req.services);
-      // gog auth add <account> --services ... --gmail-scope readonly --drive-scope readonly --gmail-no-send --remote --step 1
+      // Keep flags aligned with the official gog setup command; remote mode only
+      // splits the browser callback across Portal and the sidecar.
       const { stdout } = await execFileAsync(realBin, [
         "auth", "add", req.accountEmail,
         "--services", serviceArg,
-        "--gmail-scope", "readonly",
-        "--drive-scope", "readonly",
-        "--gmail-no-send",
         "--remote",
         "--step", "1",
       ], {
@@ -748,9 +747,6 @@ export async function gogOauthStart(accountEmail: string): Promise<GogOauthStart
     const { stdout } = await execFileAsync(realBin, [
       "auth", "add", accountEmail,
       "--services", serviceArg,
-      "--gmail-scope", "readonly",
-      "--drive-scope", "readonly",
-      "--gmail-no-send",
       "--remote",
       "--step", "1",
     ], {

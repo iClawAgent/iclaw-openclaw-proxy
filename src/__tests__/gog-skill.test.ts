@@ -277,6 +277,80 @@ describe("gog-skill service", () => {
       // No pending state for this account either
       expect(result.ok).toBe(false);
     });
+
+    it("uses official gog service order and no scope override flags for OAuth step 1", async () => {
+      mockExecFileAsync.mockReset();
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=abc", stderr: "" });
+
+      await setupGog({
+        accountEmail: "step1@example.com",
+        authMode: "oauth",
+        services: ["gmail", "calendar", "drive", "contacts", "sheets", "docs"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      const step1Call = mockExecFileAsync.mock.calls.find((call) => {
+        const args = call[1] as string[];
+        return args.includes("auth") && args.includes("add") && args.includes("--step") && args.includes("1");
+      });
+      expect(step1Call).toBeDefined();
+      const args = step1Call![1] as string[];
+      expect(args).toContain("gmail,calendar,drive,contacts,sheets,docs");
+      expect(args).not.toContain("--gmail-scope");
+      expect(args).not.toContain("--drive-scope");
+      expect(args).not.toContain("--gmail-no-send");
+    });
+
+    it("uses official gog service order and no scope override flags for OAuth step 2", async () => {
+      mockExecFileAsync.mockReset();
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=def", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "step2@example.com", stderr: "" });
+
+      await setupGog({
+        accountEmail: "step2@example.com",
+        authMode: "oauth",
+        services: ["gmail", "calendar", "drive", "contacts", "sheets", "docs"],
+        oauthClientJson: validOauthClientJson(),
+      });
+      await gogOauthComplete({
+        accountEmail: "step2@example.com",
+        redirectUrl: "http://localhost/?state=def&code=xyz",
+      });
+
+      const step2Call = mockExecFileAsync.mock.calls.find((call) => {
+        const args = call[1] as string[];
+        return args.includes("auth") && args.includes("add") && args.includes("--step") && args.includes("2");
+      });
+      expect(step2Call).toBeDefined();
+      const args = step2Call![1] as string[];
+      expect(args).toContain("gmail,calendar,drive,contacts,sheets,docs");
+      expect(args).not.toContain("--gmail-scope");
+      expect(args).not.toContain("--drive-scope");
+      expect(args).not.toContain("--gmail-no-send");
+    });
   });
 
   // ─── disconnect ───────────────────────────────────────────────────────────
