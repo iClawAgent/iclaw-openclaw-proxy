@@ -195,6 +195,8 @@ export function getGogWrapperPath(): string {
   return path.posix.join(getStateDir(), ".iclaw/bin/gog");
 }
 
+export const GOG_GLOBAL_BIN_PATH = "/usr/local/bin/gog";
+
 /** XDG_CONFIG_HOME override for gog — keeps config under persistent state */
 export function getGogConfigHome(): string {
   return path.posix.join(getStateDir(), ".iclaw/gog/config");
@@ -446,6 +448,19 @@ exec ${realBinPath} "$@"
   await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
   await fs.rename(tmpPath, wrapperPath);
   await fs.chmod(wrapperPath, 0o755);
+  await exposeGogOnSystemPath(wrapperPath);
+}
+
+async function exposeGogOnSystemPath(wrapperPath: string): Promise<void> {
+  try {
+    await fs.unlink(GOG_GLOBAL_BIN_PATH).catch(() => {});
+    await fs.symlink(wrapperPath, GOG_GLOBAL_BIN_PATH);
+  } catch (err) {
+    console.error("[gog] failed to expose gog on system PATH", {
+      target: GOG_GLOBAL_BIN_PATH,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ─── Credential File Writing ──────────────────────────────────────────────────
@@ -506,12 +521,10 @@ export function validateOauthClientJson(clientJson: unknown): void {
 function buildUpdateSkillEnv(accountEmail: string): Record<string, string> {
   const stateDir = getStateDir();
   const gogBinDir = path.posix.join(stateDir, ".iclaw/bin");
-  const gogConfigHome = path.posix.join(stateDir, ".iclaw/gog/config");
   const basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
   return {
     PATH: `${gogBinDir}:${basePath}`,
-    XDG_CONFIG_HOME: gogConfigHome,
     GOG_ACCOUNT: accountEmail,
     GOG_CLIENT: accountEmail,
     GOG_JSON: "true",
