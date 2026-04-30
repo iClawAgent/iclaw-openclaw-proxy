@@ -813,11 +813,13 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
       });
     } catch (err: unknown) {
       const execErr = err as { stderr?: string; stdout?: string; code?: number | string };
-      console.error("[gog] auth add --step 2 failed", {
+      const diagPayload = {
         code: execErr?.code,
         stderr: execErr?.stderr?.slice(0, 500),
         stdout: execErr?.stdout?.slice(0, 500),
-      });
+      };
+      console.error("[gog] auth add --step 2 failed", diagPayload);
+      console.log("[gog] auth add --step 2 failed (stdout diag)", JSON.stringify(diagPayload));
       const detail = (execErr?.stderr ?? execErr?.stdout ?? "").slice(0, 200) || undefined;
       events.push({ action: "gog_auth_check_failed", status: "failed", message: detail });
       return { ok: false, status: "failed", message: "gog_auth_check_failed", events };
