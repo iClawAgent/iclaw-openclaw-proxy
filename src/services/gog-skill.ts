@@ -544,6 +544,24 @@ function authListShowsStoredCredentials(stdout: string, stderr: string): boolean
   return !/no\s+tokens?\s+stored/i.test(output);
 }
 
+function safeDiagText(value: unknown, maxChars = 500): string | undefined {
+  const text = typeof value === "string" ? value : value instanceof Error ? value.message : value == null ? "" : String(value);
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return trimmed
+    .replace(/code=([^&\s]+)/gi, "code=[redacted]")
+    .replace(/access_token[=:][^\s&]+/gi, "access_token=[redacted]")
+    .replace(/refresh_token[=:][^\s&]+/gi, "refresh_token=[redacted]")
+    .slice(0, maxChars);
+}
+
+function logGogDiagnostic(label: string, payload: Record<string, unknown>): void {
+  const safePayload = Object.fromEntries(
+    Object.entries(payload).map(([key, value]) => [key, safeDiagText(value)]),
+  );
+  console.error(`[gog] ${label}`, safePayload);
+}
+
 // ─── Services Array to CLI Flags ─────────────────────────────────────────────
 
 function servicesToCliArg(services: GogService[]): string {
@@ -791,6 +809,10 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
       events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect" });
       return { ok: false, status: "failed", message: "oauth_invalid_redirect", events };
     }
+    if (!req.redirectUrl.includes("code=")) {
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect_missing_code" });
+      return { ok: false, status: "failed", message: "oauth_invalid_redirect_missing_code", events };
+    }
 
     const gogEnv = await getGogEnv();
     const realBin = getGogRealBinPath();
@@ -811,15 +833,14 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
       const execErr = err as { stderr?: string; stdout?: string; code?: number | string };
       const diagPayload = {
         code: execErr?.code,
-        stderr: execErr?.stderr?.slice(0, 500),
-        stdout: execErr?.stdout?.slice(0, 500),
+        stderr: execErr?.stderr,
+        stdout: execErr?.stdout,
       };
       console.error("[gog] auth add --step 2 failed", diagPayload);
-      const diagLine = `${new Date().toISOString()} [gog] auth add --step 2 failed ${JSON.stringify(diagPayload)}\n`;
-      fs.appendFile("/tmp/sidecar.log", diagLine).catch(() => {});
-      const detail = (execErr?.stderr ?? execErr?.stdout ?? "").slice(0, 200) || undefined;
-      events.push({ action: "gog_auth_check_failed", status: "failed", message: detail });
-      return { ok: false, status: "failed", message: "gog_auth_check_failed", events };
+      logGogDiagnostic("auth add --step 2 failed", diagPayload);
+      const detail = safeDiagText(execErr?.stderr ?? execErr?.stdout, 200);
+      events.push({ action: "gog_auth_check_failed", status: "failed", message: detail, errorCode: "oauth_step2_failed" });
+      return { ok: false, status: "failed", message: "oauth_step2_failed", events };
     }
 
     // Verify auth
@@ -829,9 +850,11 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
         timeout: 15_000,
       });
       if (!authListShowsStoredCredentials(stdout, stderr)) {
+        logGogDiagnostic("auth list check found no tokens", { stdout, stderr });
         events.push({
           action: "gog_auth_check_failed",
           status: "failed",
+          message: safeDiagText(stdout || stderr, 200),
           errorCode: "gog_tokens_missing",
         });
         return {
@@ -841,7 +864,12 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
           events,
         };
       }
-    } catch {
+    } catch (err) {
+      logGogDiagnostic("auth list --check failed", {
+        message: err instanceof Error ? err.message : String(err),
+        stdout: (err as { stdout?: string })?.stdout,
+        stderr: (err as { stderr?: string })?.stderr,
+      });
       // Run auth doctor for diagnostics
       let doctorSummary: string | undefined;
       let doctorErrorCode: string | undefined;
