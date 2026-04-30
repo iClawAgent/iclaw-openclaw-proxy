@@ -37,6 +37,27 @@ async function fetchGogPayload(body: GogTokenBody): Promise<{ payload: unknown }
   return resp.json() as Promise<{ payload: unknown }>;
 }
 
+function logFailedGogResult(context: string, result: unknown): void {
+  if (!result || typeof result !== "object") return;
+  const body = result as {
+    ok?: boolean;
+    status?: string;
+    message?: string;
+    events?: Array<{ action?: string; status?: string; message?: string; errorCode?: string }>;
+  };
+  if (body.ok !== false && body.status !== "failed") return;
+  console.error(`[sidecar] ${context} returned failure`, {
+    status: body.status,
+    message: body.message,
+    events: body.events?.map((event) => ({
+      action: event.action,
+      status: event.status,
+      message: event.message,
+      errorCode: event.errorCode,
+    })),
+  });
+}
+
 // POST /internal/skills/bird/setup-by-token
 //
 // No adminAuth middleware — self-authenticated via the one-time token exchange.
@@ -117,6 +138,7 @@ internalRouter.post("/internal/skills/gog/setup-by-token", async (c) => {
   if (!result) return c.json({ error: "token_exchange_failed" }, 401);
   try {
     const res = await setupGog(result.payload as GogSetupRequest);
+    logFailedGogResult("gog setup-by-token", res);
     return c.json(res);
   } catch (err) {
     const code = err instanceof Error ? err.message : "gog_setup_failed";
@@ -149,6 +171,7 @@ internalRouter.post("/internal/skills/gog/oauth-start-by-token", async (c) => {
   const req = result.payload as { accountEmail: string };
   try {
     const res = await gogOauthStart(req.accountEmail);
+    logFailedGogResult("gog oauth-start-by-token", res);
     return c.json(res);
   } catch (err) {
     const code = err instanceof Error ? err.message : "gog_oauth_start_failed";
@@ -180,6 +203,7 @@ internalRouter.post("/internal/skills/gog/oauth-complete-by-token", async (c) =>
   if (!result) return c.json({ error: "token_exchange_failed" }, 401);
   try {
     const res = await gogOauthComplete(result.payload as GogOauthCompleteRequest);
+    logFailedGogResult("gog oauth-complete-by-token", res);
     return c.json(res);
   } catch (err) {
     const code = err instanceof Error ? err.message : "gog_oauth_complete_failed";
@@ -212,6 +236,7 @@ internalRouter.post("/internal/skills/gog/disconnect-by-token", async (c) => {
   const req = result.payload as { accountEmail: string };
   try {
     const res = await gogDisconnect(req.accountEmail);
+    logFailedGogResult("gog disconnect-by-token", res);
     return c.json(res);
   } catch (err) {
     const code = err instanceof Error ? err.message : "gog_disconnect_failed";
