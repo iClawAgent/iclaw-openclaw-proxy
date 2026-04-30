@@ -819,7 +819,8 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
         stdout: execErr?.stdout?.slice(0, 500),
       };
       console.error("[gog] auth add --step 2 failed", diagPayload);
-      console.log("[gog] auth add --step 2 failed (stdout diag)", JSON.stringify(diagPayload));
+      const diagLine = `${new Date().toISOString()} [gog] auth add --step 2 failed ${JSON.stringify(diagPayload)}\n`;
+      fs.appendFile("/tmp/sidecar.log", diagLine).catch(() => {});
       const detail = (execErr?.stderr ?? execErr?.stdout ?? "").slice(0, 200) || undefined;
       events.push({ action: "gog_auth_check_failed", status: "failed", message: detail });
       return { ok: false, status: "failed", message: "gog_auth_check_failed", events };
