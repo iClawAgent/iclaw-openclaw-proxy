@@ -1,0 +1,1051 @@
+import { createHash, randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import https from "node:https";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
+import { installSkillFromClawHub, updateSkill } from "./gateway-rpc.js";
+import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
+
+// Local types — sidecar is a git submodule and MUST NOT import from @iclawagent/shared.
+// Keep in sync with packages/shared/src/types.ts Gog* types manually.
+
+// Gog skill: "temporary_access_token" active. "service_account" remains out of scope.
+export type GogAuthMode = "oauth" | "temporary_access_token";
+export type GogService = "gmail" | "calendar" | "drive" | "contacts" | "docs" | "sheets";
+
+const DEFAULT_SERVICES: GogService[] = ["gmail", "calendar", "drive", "contacts", "sheets", "docs"];
+
+export interface GogSetupRequest {
+  accountEmail: string;
+  authMode: GogAuthMode;
+  services: GogService[];
+  oauthClientJson?: unknown;
+  serviceAccountJson?: unknown;
+  temporaryAccessToken?: string;
+}
+
+export interface GogSidecarEvent {
+  action: string;
+  status: "success" | "failed";
+  message?: string;
+  errorCode?: string;
+}
+
+export interface GogSetupResponse {
+  ok: boolean;
+  status: "pending_oauth" | "connected" | "failed" | "needs_image_upgrade";
+  accountEmail?: string;
+  authMode: GogAuthMode;
+  message?: string;
+  authorizationUrl?: string;
+  expiresAt?: string;
+  events: GogSidecarEvent[];
+}
+
+export interface GogStatusResponse {
+  installed: boolean;
+  connected: boolean;
+  accountEmail?: string;
+  authMode?: GogAuthMode;
+  temporary?: boolean;
+  lastVerifiedAt?: string;
+  missing?: {
+    bins?: string[];
+    credentials?: string[];
+    config?: string[];
+  };
+}
+
+export interface GogOauthStartRequest {
+  accountEmail: string;
+}
+
+export interface GogOauthStartResponse {
+  ok: boolean;
+  authorizationUrl: string;
+  expiresAt: string;
+  events: GogSidecarEvent[];
+}
+
+export interface GogOauthCompleteRequest {
+  accountEmail: string;
+  redirectUrl: string;
+}
+
+export interface GogOauthCompleteResponse {
+  ok: boolean;
+  status: "connected" | "failed";
+  message?: string;
+  events: GogSidecarEvent[];
+}
+
+export interface GogDisconnectRequest {
+  accountEmail: string;
+}
+
+export interface GogDisconnectResponse {
+  ok: boolean;
+  status: "disconnected";
+  events: GogSidecarEvent[];
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+// To update the pinned gogcli version:
+// 1. Download the new release checksums from:
+//    https://github.com/steipete/gogcli/releases/download/v{NEW_VERSION}/checksums.txt
+// 2. Update GOG_VERSION to the new version string.
+// 3. Update GOG_SHA256 with the SHA256 values for linux_amd64 and linux_arm64 from checksums.txt.
+// 4. Run: pnpm --dir iclawagent-app vitest run packages/iclaw-openclaw-proxy/src/__tests__/gog-skill.test.ts
+// 5. Deploy and verify with: gog --version on a running instance.
+export const GOG_VERSION = "0.14.0";
+export const GOG_CLAWHUB_SLUG = "gog";
+export const BAKED_GOG_REAL_BIN_PATH = "/usr/local/bin/gog-real";
+
+/** SHA256 hashes per architecture for gogcli_0.14.0_linux_{arch}.tar.gz */
+export const GOG_SHA256: Record<string, string> = {
+  linux_amd64: "b2adaa503627aa56d9186cf1047a790aa15f8dd18522480dd4ff14060c9dd21b",
+  linux_arm64: "28eab80326328d4bcbead32ae16b4e66ed9661376d251d60e38b85989b7ca07b",
+};
+
+/** Artifact URL pattern for gogcli releases */
+export function gogArtifactUrl(arch: string): string {
+  return `https://github.com/steipete/gogcli/releases/download/v${GOG_VERSION}/gogcli_${GOG_VERSION}_${arch}.tar.gz`;
+}
+
+const OAUTH_REMOTE_TTL_MS = parseInt(
+  process.env.GOG_OAUTH_REMOTE_TTL_SECONDS ?? "600",
+  10,
+) * 1000;
+
+const MUTEX_TIMEOUT_MS = 30_000;
+
+const execFileAsync = promisify(execFile);
+
+// ─── Pending OAuth State (in-memory, per account) ─────────────────────────────
+
+interface PendingOauth {
+  authorizationUrl: string;
+  expiresAt: Date;
+  services: GogService[];
+}
+
+const pendingOauthState = new Map<string, PendingOauth>();
+
+// ─── Per-account mutex ────────────────────────────────────────────────────────
+
+const mutexes = new Map<string, Promise<void>>();
+
+async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  // Wait for any existing lock
+  const existing = mutexes.get(key);
+  if (existing) {
+    // Signal that the key is locked — caller should receive 409
+    throw new Error("gog_setup_in_progress");
+  }
+
+  let resolve!: () => void;
+  const lock = new Promise<void>((r) => { resolve = r; });
+  mutexes.set(key, lock);
+
+  const timeout = setTimeout(() => {
+    mutexes.delete(key);
+    resolve();
+  }, MUTEX_TIMEOUT_MS);
+
+  try {
+    return await fn();
+  } finally {
+    clearTimeout(timeout);
+    mutexes.delete(key);
+    resolve();
+  }
+}
+
+// ─── Path Getters ─────────────────────────────────────────────────────────────
+
+function getStateDir(): string {
+  const val = process.env.OPENCLAW_STATE_DIR;
+  if (!val) throw new Error("OPENCLAW_STATE_DIR is not set");
+  if (!val.startsWith("/")) throw new Error(`OPENCLAW_STATE_DIR must be an absolute path, got: "${val}"`);
+  return val;
+}
+
+/**
+ * Validates and returns OPENCLAW_STATE_DIR, also checking it is writable.
+ * Call this at the start of any setup action that writes to persistent state.
+ */
+async function ensureStateDir(): Promise<string> {
+  const stateDir = getStateDir(); // throws if unset or non-absolute
+  await fs.access(stateDir, fs.constants.W_OK).catch(() => {
+    throw new Error(`OPENCLAW_STATE_DIR is not writable: "${stateDir}"`);
+  });
+  return stateDir;
+}
+
+/** Real gogcli binary extracted from tarball */
+export function getGogRealBinPath(): string {
+  return path.posix.join(getStateDir(), ".iclaw/gog/bin/gog-real");
+}
+
+/** Wrapper script exposed to OpenClaw skill execution */
+export function getGogWrapperPath(): string {
+  return path.posix.join(getStateDir(), ".iclaw/bin/gog");
+}
+
+export const GOG_GLOBAL_BIN_PATH = "/usr/local/bin/gog";
+
+/** XDG_CONFIG_HOME override for gog — keeps config under persistent state */
+export function getGogConfigHome(): string {
+  return path.posix.join(getStateDir(), ".iclaw/gog/config");
+}
+
+/** Keyring password file path */
+export function getGogKeyringPasswordPath(): string {
+  return path.posix.join(getStateDir(), ".iclaw/gog/secrets/keyring.password");
+}
+
+/** Per-account credential directory */
+export function getGogCredentialDir(accountEmail: string): string {
+  return path.posix.join(getStateDir(), `.iclaw/gog/credentials/${accountEmail}`);
+}
+
+/** Per-account profile directory */
+export function getGogProfileDir(accountEmail: string): string {
+  return path.posix.join(getStateDir(), `.iclaw/gog/profiles/${accountEmail}`);
+}
+
+/** Per-account service-account key path */
+export function getGogServiceAccountPath(accountEmail: string): string {
+  return path.posix.join(getStateDir(), `.iclaw/gog/service-accounts/${accountEmail}.json`);
+}
+
+/** Per-account temp token path */
+export function getGogTempPath(accountEmail: string): string {
+  return path.posix.join(getStateDir(), `.iclaw/gog/temp/${accountEmail}.token`);
+}
+
+// ─── Env Builder ──────────────────────────────────────────────────────────────
+
+/**
+ * Build the env object for sidecar-direct gog command executions.
+ * Reads the keyring password from file at call time.
+ * All values are concrete absolute strings — no shell variable syntax.
+ */
+export async function getGogEnv(): Promise<Record<string, string>> {
+  const passwordPath = getGogKeyringPasswordPath();
+  let keyringPassword = "";
+  try {
+    keyringPassword = (await fs.readFile(passwordPath, "utf-8")).trim();
+  } catch {
+    // password file missing — will fail during auth operations
+  }
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([, v]) => v !== undefined) as [string, string][]
+    ),
+    GOG_KEYRING_BACKEND: "file",
+    GOG_KEYRING_PASSWORD: keyringPassword,
+    XDG_CONFIG_HOME: getGogConfigHome(),
+    // Prepend gog bin dir so gog-real can resolve helpers if any
+    PATH: `${path.posix.dirname(getGogRealBinPath())}:${process.env.PATH ?? "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}`,
+  };
+}
+
+// ─── Architecture Detection ───────────────────────────────────────────────────
+
+export function detectLinuxArch(): string {
+  const machine = os.machine ? os.machine() : os.arch();
+  if (machine === "aarch64" || machine === "arm64") return "linux_arm64";
+  return "linux_amd64";
+}
+
+// ─── SHA256 Verification ──────────────────────────────────────────────────────
+
+async function sha256File(filePath: string): Promise<string> {
+  const data = await fs.readFile(filePath);
+  return createHash("sha256").update(data).digest("hex");
+}
+
+// ─── Download Helper ──────────────────────────────────────────────────────────
+
+function downloadToFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = require("node:fs").createWriteStream(dest);
+    const doGet = (u: string) => {
+      https.get(u, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) {
+          const location = res.headers.location;
+          if (location) { doGet(location); return; }
+          reject(new Error("redirect_missing_location"));
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`download_failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        res.pipe(file);
+        file.on("finish", () => file.close(() => resolve()));
+        file.on("error", (err: Error) => { fs.unlink(dest).catch(() => {}); reject(err); });
+      }).on("error", (err) => { fs.unlink(dest).catch(() => {}); reject(err); });
+    };
+    doGet(url);
+  });
+}
+
+// ─── Binary Install ───────────────────────────────────────────────────────────
+
+export const gogBinaryInternals = {
+  downloadToFile,
+  execFileAsync,
+};
+
+/**
+ * Install gogcli v{GOG_VERSION} binary idempotently.
+ * Returns events describing what happened.
+ */
+export async function installGogBinary(): Promise<GogSidecarEvent[]> {
+  const events: GogSidecarEvent[] = [];
+  const realBinPath = getGogRealBinPath();
+  // Check if correct version already installed
+  try {
+    const gogEnv = await getGogEnv();
+    const { stdout } = await gogBinaryInternals.execFileAsync(realBinPath, ["--version"], {
+      timeout: 5_000,
+      env: gogEnv,
+    });
+    if (stdout.trim().includes(GOG_VERSION)) {
+      await ensureKeyringPassword();
+      await writeGogWrapper();
+      events.push({ action: "gog_binary_install_skipped", status: "success", message: `gog v${GOG_VERSION} already installed` });
+      return events;
+    }
+  } catch {
+    // not installed or wrong version — continue
+  }
+  let bakedVersionOutput: string | undefined;
+  try {
+    const { stdout } = await gogBinaryInternals.execFileAsync(BAKED_GOG_REAL_BIN_PATH, ["--version"], {
+      timeout: 5_000,
+    });
+    bakedVersionOutput = stdout;
+  } catch {
+    // baked binary missing or wrong version - fall back to runtime install
+  }
+  if (bakedVersionOutput?.trim().includes(GOG_VERSION)) {
+    const realBinDir = path.posix.dirname(realBinPath);
+    await fs.mkdir(realBinDir, { recursive: true, mode: 0o700 });
+    await fs.copyFile(BAKED_GOG_REAL_BIN_PATH, realBinPath);
+    await fs.chmod(realBinPath, 0o755);
+    await ensureKeyringPassword();
+    await writeGogWrapper();
+    events.push({
+      action: "gog_binary_install_skipped",
+      status: "success",
+      message: `gog v${GOG_VERSION} copied from baked image binary`,
+    });
+    return events;
+  }
+
+  // Detect arch
+  const arch = detectLinuxArch();
+  const expectedHash = GOG_SHA256[arch];
+  if (!expectedHash) {
+    events.push({ action: "gog_binary_install_failed", status: "failed", errorCode: "unsupported_arch", message: `Unsupported architecture: ${arch}` });
+    throw new Error("needs_image_upgrade");
+  }
+
+  const url = gogArtifactUrl(arch);
+  const tmpTar = path.join(os.tmpdir(), `gogcli_${GOG_VERSION}_${arch}_${Date.now()}.tar.gz`);
+  const tmpExtractDir = path.join(os.tmpdir(), `gogcli_extract_${Date.now()}`);
+
+  try {
+    // Download
+    await gogBinaryInternals.downloadToFile(url, tmpTar);
+
+    // Verify SHA256
+    const actualHash = await sha256File(tmpTar);
+    if (actualHash !== expectedHash) {
+      await fs.unlink(tmpTar).catch(() => {});
+      events.push({ action: "gog_binary_install_failed", status: "failed", errorCode: "checksum_mismatch" });
+      throw new Error("gog_binary_install_failed");
+    }
+
+    // Extract
+    await fs.mkdir(tmpExtractDir, { recursive: true });
+    await gogBinaryInternals.execFileAsync("tar", ["-xzf", tmpTar, "-C", tmpExtractDir], { timeout: 30_000 });
+
+    const extractedBin = path.join(tmpExtractDir, "gog");
+    await fs.access(extractedBin);
+
+    // Install real binary
+    const realBinDir = path.posix.dirname(realBinPath);
+    await fs.mkdir(realBinDir, { recursive: true, mode: 0o700 });
+    await fs.copyFile(extractedBin, realBinPath);
+    await fs.chmod(realBinPath, 0o755);
+
+    // Generate keyring password on first install
+    await ensureKeyringPassword();
+
+    // Write wrapper script
+    await writeGogWrapper();
+
+    events.push({ action: "gog_binary_installed", status: "success", message: `gog v${GOG_VERSION} installed for ${arch}` });
+    return events;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "unknown";
+    if (message === "gog_binary_install_failed" || message === "needs_image_upgrade") throw err;
+    events.push({ action: "gog_binary_install_failed", status: "failed", errorCode: message });
+    throw new Error("gog_binary_install_failed");
+  } finally {
+    await fs.unlink(tmpTar).catch(() => {});
+    await fs.rm(tmpExtractDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+// ─── Keyring Password ─────────────────────────────────────────────────────────
+
+async function ensureKeyringPassword(): Promise<void> {
+  const passwordPath = getGogKeyringPasswordPath();
+  try {
+    await fs.access(passwordPath);
+    return; // already exists
+  } catch {
+    // generate new password
+  }
+  const secretsDir = path.posix.dirname(passwordPath);
+  await fs.mkdir(secretsDir, { recursive: true, mode: 0o700 });
+  const password = randomBytes(32).toString("hex");
+  const tmpPath = `${passwordPath}.tmp`;
+  await fs.writeFile(tmpPath, password, { mode: 0o600 });
+  await fs.rename(tmpPath, passwordPath);
+  await fs.chmod(passwordPath, 0o600);
+}
+
+// ─── Wrapper Script ───────────────────────────────────────────────────────────
+
+async function writeGogWrapper(): Promise<void> {
+  const stateDir = getStateDir();
+  const wrapperPath = getGogWrapperPath();
+  const realBinPath = getGogRealBinPath();
+  const keyringPasswordPath = getGogKeyringPasswordPath();
+  const configHome = getGogConfigHome();
+
+  const wrapperDir = path.posix.dirname(wrapperPath);
+  await fs.mkdir(wrapperDir, { recursive: true, mode: 0o755 });
+
+  // Use literal paths (no shell variables) in wrapper for maximum reliability.
+  // The wrapper reads the keyring password from the sidecar-owned file at exec time.
+  const wrapperContent = `#!/bin/sh
+export GOG_KEYRING_BACKEND=file
+export GOG_KEYRING_PASSWORD="$(cat ${keyringPasswordPath})"
+export XDG_CONFIG_HOME=${configHome}
+exec ${realBinPath} "$@"
+`;
+  const tmpPath = `${wrapperPath}.tmp`;
+  await fs.writeFile(tmpPath, wrapperContent, { mode: 0o755 });
+  await fs.rename(tmpPath, wrapperPath);
+  await fs.chmod(wrapperPath, 0o755);
+  await exposeGogOnSystemPath(wrapperPath);
+}
+
+async function exposeGogOnSystemPath(wrapperPath: string): Promise<void> {
+  try {
+    await fs.unlink(GOG_GLOBAL_BIN_PATH).catch(() => {});
+    await fs.symlink(wrapperPath, GOG_GLOBAL_BIN_PATH);
+  } catch (err) {
+    console.error("[gog] failed to expose gog on system PATH", {
+      target: GOG_GLOBAL_BIN_PATH,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// ─── Credential File Writing ──────────────────────────────────────────────────
+
+async function writeOauthClientJson(accountEmail: string, clientJson: unknown): Promise<string> {
+  const credDir = getGogCredentialDir(accountEmail);
+  await fs.mkdir(credDir, { recursive: true, mode: 0o700 });
+  const clientPath = path.posix.join(credDir, "client.json");
+  const tmpPath = `${clientPath}.tmp`;
+  await fs.writeFile(tmpPath, JSON.stringify(clientJson), { mode: 0o600 });
+  await fs.rename(tmpPath, clientPath);
+  await fs.chmod(clientPath, 0o600);
+  return clientPath;
+}
+
+async function writeTempToken(accountEmail: string, token: string): Promise<void> {
+  const tempDir = path.posix.join(getStateDir(), ".iclaw/gog/temp");
+  await fs.mkdir(tempDir, { recursive: true, mode: 0o700 });
+  const tokenPath = getGogTempPath(accountEmail);
+  const tmpPath = `${tokenPath}.tmp`;
+  await fs.writeFile(tmpPath, token, { mode: 0o600 });
+  await fs.rename(tmpPath, tokenPath);
+  await fs.chmod(tokenPath, 0o600);
+}
+
+// ─── OAuth Client JSON Validation ────────────────────────────────────────────
+
+export function validateOauthClientJson(clientJson: unknown): void {
+  if (!clientJson || typeof clientJson !== "object") {
+    throw new Error("oauth_client_json_invalid");
+  }
+  const obj = clientJson as Record<string, unknown>;
+
+  if ("web" in obj) {
+    throw new Error("unsupported_oauth_client_type");
+  }
+  if ("type" in obj && (obj as any).type === "service_account") {
+    throw new Error("unsupported_oauth_client_type");
+  }
+
+  const installed = obj.installed as Record<string, unknown> | undefined;
+  if (!installed || typeof installed !== "object") {
+    throw new Error("oauth_client_json_invalid");
+  }
+  const required = ["client_id", "client_secret", "auth_uri", "token_uri"];
+  for (const key of required) {
+    if (!installed[key] || typeof installed[key] !== "string") {
+      throw new Error("oauth_client_json_invalid");
+    }
+  }
+  if (!Array.isArray(installed.redirect_uris) || (installed.redirect_uris as unknown[]).length === 0) {
+    throw new Error("oauth_client_json_invalid");
+  }
+}
+
+// ─── updateSkill Env Builder ──────────────────────────────────────────────────
+
+function buildUpdateSkillEnv(accountEmail: string): Record<string, string> {
+  const stateDir = getStateDir();
+  const gogBinDir = path.posix.join(stateDir, ".iclaw/bin");
+  const basePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+  return {
+    PATH: `${gogBinDir}:${basePath}`,
+    GOG_ACCOUNT: accountEmail,
+    GOG_CLIENT: accountEmail,
+    GOG_JSON: "true",
+    GOG_COLOR: "never",
+    GOG_TIMEZONE: "UTC",
+    GOG_GMAIL_NO_SEND: "true",
+    GOG_DISABLE_COMMANDS: "",
+  };
+}
+
+function getOpenclawConfigPath(): string {
+  return process.env.OPENCLAW_CONFIG_PATH ?? path.posix.join(getStateDir(), "openclaw.json");
+}
+
+async function isGogSkillEnabledInConfig(): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(getOpenclawConfigPath(), "utf-8");
+    const cfg = JSON.parse(raw) as {
+      skills?: { entries?: Record<string, { enabled?: boolean }> };
+    };
+    return cfg.skills?.entries?.[GOG_CLAWHUB_SLUG]?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
+function authListShowsStoredCredentials(stdout: string, stderr: string): boolean {
+  const output = `${stdout}\n${stderr}`.trim();
+  if (!output) return false;
+  return !/no\s+tokens?\s+stored/i.test(output);
+}
+
+function safeDiagText(value: unknown, maxChars = 500): string | undefined {
+  const text = typeof value === "string" ? value : value instanceof Error ? value.message : value == null ? "" : String(value);
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return trimmed
+    .replace(/code=([^&\s]+)/gi, "code=[redacted]")
+    .replace(/access_token[=:][^\s&]+/gi, "access_token=[redacted]")
+    .replace(/refresh_token[=:][^\s&]+/gi, "refresh_token=[redacted]")
+    .slice(0, maxChars);
+}
+
+function logGogDiagnostic(label: string, payload: Record<string, unknown>): void {
+  const safePayload = Object.fromEntries(
+    Object.entries(payload).map(([key, value]) => [key, safeDiagText(value)]),
+  );
+  console.error(`[gog] ${label}`, safePayload);
+}
+
+// ─── Services Array to CLI Flags ─────────────────────────────────────────────
+
+function servicesToCliArg(services: GogService[]): string {
+  return services.join(",");
+}
+
+// ─── Auth URL Parsing ─────────────────────────────────────────────────────────
+
+const GOOGLE_AUTH_URL_RE = /https:\/\/accounts\.google\.com\/[^\s"']+/;
+
+export function parseAuthorizationUrl(output: string): string | null {
+  const match = output.match(GOOGLE_AUTH_URL_RE);
+  return match ? match[0] : null;
+}
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
+
+export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> {
+  return withMutex(`gog:${req.accountEmail}`, async () => {
+    const events: GogSidecarEvent[] = [];
+    events.push({ action: "gog_setup_started", status: "success" });
+
+    await ensureStateDir();
+
+    // Step 1: Install skill content
+    await installSkillFromClawHub(GOG_CLAWHUB_SLUG);
+
+    // Step 2: Install binary
+    try {
+      const binaryEvents = await installGogBinary();
+      events.push(...binaryEvents);
+    } catch (err) {
+      if (err instanceof Error && err.message === "needs_image_upgrade") {
+        events.push({
+          action: "gog_needs_image_upgrade",
+          status: "failed",
+          message: "Setup will be available after your runtime is updated",
+          errorCode: "needs_image_upgrade",
+        });
+        return {
+          ok: false,
+          status: "needs_image_upgrade",
+          accountEmail: req.accountEmail,
+          authMode: req.authMode,
+          message: "Setup will be available after your runtime is updated",
+          events,
+        };
+      }
+      throw err;
+    }
+
+    // Step 3: Write credential files
+    if (req.authMode === "oauth") {
+      validateOauthClientJson(req.oauthClientJson);
+      await writeOauthClientJson(req.accountEmail, req.oauthClientJson);
+    } else if (req.authMode === "temporary_access_token") {
+      if (!req.temporaryAccessToken) throw new Error("temporaryAccessToken is required");
+      await writeTempToken(req.accountEmail, req.temporaryAccessToken);
+    }
+
+    // Step 4: For OAuth mode — run step 1 and return pending_oauth
+    if (req.authMode === "oauth") {
+      const clientPath = path.posix.join(getGogCredentialDir(req.accountEmail), "client.json");
+      const gogEnv = await getGogEnv();
+      const realBin = getGogRealBinPath();
+
+      // gog auth credentials <path>
+      await execFileAsync(realBin, ["auth", "credentials", clientPath], {
+        env: gogEnv,
+        timeout: 15_000,
+      });
+
+      const serviceArg = servicesToCliArg(req.services);
+      // Keep flags aligned with the official gog setup command; remote mode only
+      // splits the browser callback across Portal and the sidecar.
+      const { stdout } = await execFileAsync(realBin, [
+        "auth", "add", req.accountEmail,
+        "--services", serviceArg,
+        "--remote",
+        "--step", "1",
+      ], {
+        env: gogEnv,
+        timeout: 30_000,
+      });
+
+      const authorizationUrl = parseAuthorizationUrl(stdout);
+      if (!authorizationUrl) {
+        events.push({ action: "gog_binary_install_failed", status: "failed", errorCode: "oauth_url_parse_failed" });
+        throw new Error("gog_binary_install_failed");
+      }
+
+      const expiresAt = new Date(Date.now() + OAUTH_REMOTE_TTL_MS).toISOString();
+      pendingOauthState.set(req.accountEmail, {
+        authorizationUrl,
+        expiresAt: new Date(expiresAt),
+        services: req.services,
+      });
+
+      events.push({ action: "gog_oauth_started", status: "success" });
+
+      return {
+        ok: true,
+        status: "pending_oauth",
+        accountEmail: req.accountEmail,
+        authMode: req.authMode,
+        authorizationUrl,
+        expiresAt,
+        events,
+      };
+    }
+
+    // Step 5: Call updateSkill with non-secret env
+    await updateSkill({
+      skillKey: GOG_CLAWHUB_SLUG,
+      enabled: true,
+      env: buildUpdateSkillEnv(req.accountEmail),
+    });
+    events.push({ action: "gog_skill_enabled", status: "success" });
+
+    // Step 6: For non-OAuth modes, verify auth
+    const gogEnv = await getGogEnv();
+    const realBin = getGogRealBinPath();
+    try {
+      const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+        env: gogEnv,
+        timeout: 15_000,
+      });
+      if (!authListShowsStoredCredentials(stdout, stderr)) {
+        events.push({
+          action: "gog_auth_check_failed",
+          status: "failed",
+          errorCode: "gog_tokens_missing",
+        });
+        return {
+          ok: false,
+          status: "failed",
+          accountEmail: req.accountEmail,
+          authMode: req.authMode,
+          message: "gog_tokens_missing",
+          events,
+        };
+      }
+    } catch {
+      let doctorSummary: string | undefined;
+      let doctorErrorCode: string | undefined;
+      try {
+        const { summary, errorCode } = await runAuthDoctor(gogEnv);
+        doctorSummary = summary || undefined;
+        doctorErrorCode = errorCode;
+      } catch {
+        // best-effort
+      }
+      events.push({
+        action: "gog_auth_check_failed",
+        status: "failed",
+        message: doctorSummary,
+        errorCode: doctorErrorCode,
+      });
+      return {
+        ok: false,
+        status: "failed",
+        accountEmail: req.accountEmail,
+        authMode: req.authMode,
+        message: doctorErrorCode ?? "gog_auth_check_failed",
+        events,
+      };
+    }
+
+    return {
+      ok: true,
+      status: "connected",
+      accountEmail: req.accountEmail,
+      authMode: req.authMode,
+      events,
+    };
+  });
+}
+
+// ─── OAuth Start (re-trigger) ─────────────────────────────────────────────────
+
+export async function gogOauthStart(accountEmail: string): Promise<GogOauthStartResponse> {
+  return withMutex(`gog:${accountEmail}`, async () => {
+    const events: GogSidecarEvent[] = [];
+
+    // Idempotent: return existing URL if still valid
+    const existing = pendingOauthState.get(accountEmail);
+    if (existing && existing.expiresAt > new Date()) {
+      events.push({ action: "gog_oauth_started", status: "success", message: "reused_existing_pending" });
+      return {
+        ok: true,
+        authorizationUrl: existing.authorizationUrl,
+        expiresAt: existing.expiresAt.toISOString(),
+        events,
+      };
+    }
+
+    const services = existing?.services ?? DEFAULT_SERVICES;
+    const serviceArg = servicesToCliArg(services);
+    const gogEnv = await getGogEnv();
+    const realBin = getGogRealBinPath();
+    const { stdout } = await execFileAsync(realBin, [
+      "auth", "add", accountEmail,
+      "--services", serviceArg,
+      "--remote",
+      "--step", "1",
+    ], {
+      env: gogEnv,
+      timeout: 30_000,
+    });
+
+    const authorizationUrl = parseAuthorizationUrl(stdout);
+    if (!authorizationUrl) throw new Error("gog_binary_install_failed");
+
+    const expiresAt = new Date(Date.now() + OAUTH_REMOTE_TTL_MS).toISOString();
+    pendingOauthState.set(accountEmail, {
+      authorizationUrl,
+      expiresAt: new Date(expiresAt),
+      services,
+    });
+
+    events.push({ action: "gog_oauth_started", status: "success" });
+    return { ok: true, authorizationUrl, expiresAt, events };
+  });
+}
+
+// ─── OAuth Complete ───────────────────────────────────────────────────────────
+
+export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<GogOauthCompleteResponse> {
+  return withMutex(`gog:${req.accountEmail}`, async () => {
+    const events: GogSidecarEvent[] = [];
+    const pending = pendingOauthState.get(req.accountEmail);
+
+    if (!pending) {
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_state_expired" });
+      return { ok: false, status: "failed", message: "oauth_state_expired", events };
+    }
+
+    if (pending.expiresAt < new Date()) {
+      pendingOauthState.delete(req.accountEmail);
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_state_expired" });
+      return { ok: false, status: "failed", message: "oauth_state_expired", events };
+    }
+
+    if (!req.redirectUrl || !req.redirectUrl.includes("state")) {
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect" });
+      return { ok: false, status: "failed", message: "oauth_invalid_redirect", events };
+    }
+    if (!req.redirectUrl.includes("code=")) {
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect_missing_code" });
+      return { ok: false, status: "failed", message: "oauth_invalid_redirect_missing_code", events };
+    }
+
+    const gogEnv = await getGogEnv();
+    const realBin = getGogRealBinPath();
+    const serviceArg = servicesToCliArg(pending.services);
+
+    try {
+      await execFileAsync(realBin, [
+        "auth", "add", req.accountEmail,
+        "--services", serviceArg,
+        "--remote",
+        "--step", "2",
+        "--auth-url", req.redirectUrl,
+      ], {
+        env: gogEnv,
+        timeout: 30_000,
+      });
+    } catch (err: unknown) {
+      const execErr = err as { stderr?: string; stdout?: string; code?: number | string };
+      const diagPayload = {
+        code: execErr?.code,
+        stderr: execErr?.stderr,
+        stdout: execErr?.stdout,
+      };
+      console.error("[gog] auth add --step 2 failed", diagPayload);
+      logGogDiagnostic("auth add --step 2 failed", diagPayload);
+      const detail = safeDiagText(execErr?.stderr ?? execErr?.stdout, 200);
+      events.push({ action: "gog_auth_check_failed", status: "failed", message: detail, errorCode: "oauth_step2_failed" });
+      return { ok: false, status: "failed", message: "oauth_step2_failed", events };
+    }
+
+    // Verify auth
+    try {
+      const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+        env: gogEnv,
+        timeout: 15_000,
+      });
+      if (!authListShowsStoredCredentials(stdout, stderr)) {
+        logGogDiagnostic("auth list check found no tokens", { stdout, stderr });
+        events.push({
+          action: "gog_auth_check_failed",
+          status: "failed",
+          message: safeDiagText(stdout || stderr, 200),
+          errorCode: "gog_tokens_missing",
+        });
+        return {
+          ok: false,
+          status: "failed",
+          message: "gog_tokens_missing",
+          events,
+        };
+      }
+    } catch (err) {
+      logGogDiagnostic("auth list --check failed", {
+        message: err instanceof Error ? err.message : String(err),
+        stdout: (err as { stdout?: string })?.stdout,
+        stderr: (err as { stderr?: string })?.stderr,
+      });
+      // Run auth doctor for diagnostics
+      let doctorSummary: string | undefined;
+      let doctorErrorCode: string | undefined;
+      try {
+        const { summary, errorCode } = await runAuthDoctor(gogEnv);
+        doctorSummary = summary || undefined;
+        doctorErrorCode = errorCode;
+      } catch {
+        // best-effort
+      }
+      events.push({
+        action: "gog_auth_check_failed",
+        status: "failed",
+        message: doctorSummary,
+        errorCode: doctorErrorCode,
+      });
+      return {
+        ok: false,
+        status: "failed",
+        message: doctorErrorCode ?? "gog_auth_check_failed",
+        events,
+      };
+    }
+
+    pendingOauthState.delete(req.accountEmail);
+
+    // Enable skill
+    await updateSkill({
+      skillKey: GOG_CLAWHUB_SLUG,
+      enabled: true,
+      env: buildUpdateSkillEnv(req.accountEmail),
+    });
+    events.push({ action: "gog_skill_enabled", status: "success" });
+    events.push({ action: "gog_oauth_completed", status: "success" });
+
+    return { ok: true, status: "connected", events };
+  });
+}
+
+// ─── Auth Doctor Diagnostic ───────────────────────────────────────────────────
+
+const KEYRING_INTEGRITY_RE = /aes\.KeyUnwrap\(\): integrity check failed/i;
+const MAX_DOCTOR_OUTPUT_CHARS = 500;
+
+/**
+ * Run `gog-real auth doctor --check` and return a redacted diagnostic summary.
+ * Never logs keyring passwords. Returns errorCode "keyring_integrity_failed" if
+ * the keyring is corrupt. Throws on binary exec failure.
+ */
+export async function runAuthDoctor(gogEnv: Record<string, string>): Promise<{
+  summary: string;
+  errorCode: string | undefined;
+}> {
+  const realBin = getGogRealBinPath();
+  let output = "";
+  try {
+    const { stdout } = await execFileAsync(realBin, ["auth", "doctor", "--check"], {
+      env: gogEnv,
+      timeout: 15_000,
+    });
+    output = stdout;
+  } catch (err) {
+    // stderr may contain diagnostic info; combine if present
+    output = err instanceof Error ? err.message : String(err);
+  }
+
+  // Redact anything that looks like a password or key value
+  const redacted = output.replace(/password[^\s]*/gi, "[redacted]").replace(/GOG_KEYRING_PASSWORD[^\s]*/gi, "[redacted]");
+  const summary = redacted.slice(0, MAX_DOCTOR_OUTPUT_CHARS);
+  const errorCode = KEYRING_INTEGRITY_RE.test(output) ? "keyring_integrity_failed" : undefined;
+
+  return { summary, errorCode };
+}
+
+// ─── Status ───────────────────────────────────────────────────────────────────
+
+export async function gogStatus(): Promise<GogStatusResponse> {
+  const realBin = getGogRealBinPath();
+  let installed = false;
+  const missing: { bins?: string[]; credentials?: string[] } = {};
+
+  try {
+    const gogEnv = await getGogEnv();
+    await execFileAsync(realBin, ["--version"], { env: gogEnv, timeout: 5_000 });
+    installed = true;
+  } catch {
+    missing.bins = ["gog"];
+  }
+
+  if (!installed) {
+    return { installed: false, connected: false, missing };
+  }
+
+  const gogEnv = await getGogEnv();
+  try {
+    const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
+      env: gogEnv,
+      timeout: 15_000,
+    });
+    if (!authListShowsStoredCredentials(stdout, stderr)) {
+      return {
+        installed: true,
+        connected: false,
+        missing: { credentials: ["gog_tokens_missing"] },
+      };
+    }
+    if (!(await isGogSkillEnabledInConfig())) {
+      return {
+        installed: true,
+        connected: false,
+        missing: { config: ["gog_skill_not_enabled"] },
+      };
+    }
+    return { installed: true, connected: true };
+  } catch {
+    // Run auth doctor for diagnostics on auth check failure
+    try {
+      const { errorCode } = await runAuthDoctor(gogEnv);
+      if (errorCode) {
+        return { installed: true, connected: false, missing: { credentials: [errorCode] } };
+      }
+    } catch {
+      // best-effort — ignore doctor failure
+    }
+    return { installed: true, connected: false };
+  }
+}
+
+// ─── Disconnect ───────────────────────────────────────────────────────────────
+
+export async function gogDisconnect(accountEmail: string): Promise<GogDisconnectResponse> {
+  return withMutex(`gog:${accountEmail}`, async () => {
+    const events: GogSidecarEvent[] = [];
+
+    // Remove per-account credential tree (idempotent — ignore ENOENT)
+    const credDir = getGogCredentialDir(accountEmail);
+    const profileDir = getGogProfileDir(accountEmail);
+    const serviceAccountPath = getGogServiceAccountPath(accountEmail);
+    const tempPath = getGogTempPath(accountEmail);
+    const envPath = path.posix.join(getStateDir(), `.iclaw/gog/env/${accountEmail}.env`);
+
+    await fs.rm(credDir, { recursive: true, force: true });
+    await fs.rm(profileDir, { recursive: true, force: true });
+    await fs.rm(serviceAccountPath, { force: true }).catch(() => {});
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+    await fs.rm(envPath, { force: true }).catch(() => {});
+
+    // Remove pending OAuth state if any
+    pendingOauthState.delete(accountEmail);
+
+    // Disable skill via Gateway (Phase 1: single account, so always disable)
+    try {
+      await updateSkill({
+        skillKey: GOG_CLAWHUB_SLUG,
+        enabled: false,
+        env: {},
+      });
+      events.push({ action: "gog_skill_disabled", status: "success" });
+    } catch {
+      // best-effort — disconnect still succeeds
+    }
+
+    events.push({ action: "gog_disconnected", status: "success" });
+    return { ok: true, status: "disconnected", events };
+  });
+}

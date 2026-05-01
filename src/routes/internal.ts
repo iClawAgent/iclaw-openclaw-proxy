@@ -1,7 +1,62 @@
 import { Hono } from "hono";
 import { setupBirdSkill, redactBirdSecrets, type BirdSetupResponse } from "../services/bird-skill.js";
+import {
+  setupGog,
+  gogOauthStart,
+  gogOauthComplete,
+  gogDisconnect,
+  type GogSetupRequest,
+  type GogOauthCompleteRequest,
+} from "../services/gog-skill.js";
 
 export const internalRouter = new Hono();
+
+// ─── Gog token-exchange helpers ───────────────────────────────────────────────
+
+interface GogTokenBody {
+  token: string;
+  instanceId: string;
+  tokenCallbackBaseUrl: string;
+}
+
+/**
+ * Fetch the gog setup payload from portal-api using the one-time token.
+ * Auth: Authorization: Bearer <SIDECAR_ADMIN_TOKEN>.
+ * SSRF guard: tokenCallbackBaseUrl must match TOKEN_CALLBACK_BASE_URL env var.
+ */
+async function fetchGogPayload(body: GogTokenBody): Promise<{ payload: unknown } | null> {
+  const expectedBase = process.env.TOKEN_CALLBACK_BASE_URL;
+  if (!expectedBase || body.tokenCallbackBaseUrl !== expectedBase) return null;
+
+  const sidecarAdminToken = process.env.SIDECAR_ADMIN_TOKEN ?? "";
+  const url = `${body.tokenCallbackBaseUrl}/sidecar/skills/gog/setup-token/${encodeURIComponent(body.token)}?instanceId=${encodeURIComponent(body.instanceId)}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${sidecarAdminToken}` },
+  });
+  if (!resp.ok) return null;
+  return resp.json() as Promise<{ payload: unknown }>;
+}
+
+function logFailedGogResult(context: string, result: unknown): void {
+  if (!result || typeof result !== "object") return;
+  const body = result as {
+    ok?: boolean;
+    status?: string;
+    message?: string;
+    events?: Array<{ action?: string; status?: string; message?: string; errorCode?: string }>;
+  };
+  if (body.ok !== false && body.status !== "failed") return;
+  console.error(`[sidecar] ${context} returned failure`, {
+    status: body.status,
+    message: body.message,
+    events: body.events?.map((event) => ({
+      action: event.action,
+      status: event.status,
+      message: event.message,
+      errorCode: event.errorCode,
+    })),
+  });
+}
 
 // POST /internal/skills/bird/setup-by-token
 //
@@ -56,5 +111,137 @@ internalRouter.post("/internal/skills/bird/setup-by-token", async (c) => {
     return c.json(redactBirdSecrets(result) as BirdSetupResponse);
   } catch {
     return c.json({ error: "bird_setup_failed" }, 502);
+  }
+});
+
+// ─── POST /internal/skills/gog/setup-by-token ────────────────────────────────
+
+internalRouter.post("/internal/skills/gog/setup-by-token", async (c) => {
+  const body = await c.req.json<GogTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    console.error("[sidecar] gog setup-by-token: TOKEN_CALLBACK_BASE_URL not configured (fail closed)");
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    console.error("[sidecar] gog setup-by-token: tokenCallbackBaseUrl mismatch (SSRF guard)");
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+  let result;
+  try {
+    result = await fetchGogPayload(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!result) return c.json({ error: "token_exchange_failed" }, 401);
+  try {
+    const res = await setupGog(result.payload as GogSetupRequest);
+    logFailedGogResult("gog setup-by-token", res);
+    return c.json(res);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_setup_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog setup-by-token failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── POST /internal/skills/gog/oauth-start-by-token ──────────────────────────
+
+internalRouter.post("/internal/skills/gog/oauth-start-by-token", async (c) => {
+  const body = await c.req.json<GogTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+  let result;
+  try {
+    result = await fetchGogPayload(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!result) return c.json({ error: "token_exchange_failed" }, 401);
+  const req = result.payload as { accountEmail: string };
+  try {
+    const res = await gogOauthStart(req.accountEmail);
+    logFailedGogResult("gog oauth-start-by-token", res);
+    return c.json(res);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_oauth_start_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog oauth-start-by-token failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── POST /internal/skills/gog/oauth-complete-by-token ───────────────────────
+
+internalRouter.post("/internal/skills/gog/oauth-complete-by-token", async (c) => {
+  const body = await c.req.json<GogTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+  let result;
+  try {
+    result = await fetchGogPayload(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!result) return c.json({ error: "token_exchange_failed" }, 401);
+  try {
+    const res = await gogOauthComplete(result.payload as GogOauthCompleteRequest);
+    logFailedGogResult("gog oauth-complete-by-token", res);
+    return c.json(res);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_oauth_complete_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog oauth-complete-by-token failed:", code);
+    return c.json({ error: code }, 502);
+  }
+});
+
+// ─── POST /internal/skills/gog/disconnect-by-token ───────────────────────────
+
+internalRouter.post("/internal/skills/gog/disconnect-by-token", async (c) => {
+  const body = await c.req.json<GogTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+  let result;
+  try {
+    result = await fetchGogPayload(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!result) return c.json({ error: "token_exchange_failed" }, 401);
+  const req = result.payload as { accountEmail: string };
+  try {
+    const res = await gogDisconnect(req.accountEmail);
+    logFailedGogResult("gog disconnect-by-token", res);
+    return c.json(res);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "gog_disconnect_failed";
+    if (code === "gog_setup_in_progress") return c.json({ error: code }, 409);
+    console.error("[sidecar] gog disconnect-by-token failed:", code);
+    return c.json({ error: code }, 502);
   }
 });

@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { validateEnv, getSidecarAdminToken } from "./env.js";
@@ -7,6 +8,27 @@ import { adminRouter } from "./routes/admin.js";
 import { internalRouter } from "./routes/internal.js";
 
 validateEnv();
+
+// Best-effort: re-expose skill binaries on system PATH after container restart.
+// /usr/local/bin is ephemeral; the wrappers live on the persistent volume.
+// This mirrors OPENCLAW_STATE_ROOT_PREP_SNIPPET but runs inside the sidecar so
+// existing instances that predate the bootstrap fix also self-heal on restart.
+(async () => {
+  const stateDir = process.env.OPENCLAW_STATE_DIR;
+  if (!stateDir) return;
+  for (const [wrapper, link] of [
+    [`${stateDir}/.iclaw/bin/gog`, "/usr/local/bin/gog"],
+    [`${stateDir}/.iclaw/bin/bird`, "/usr/local/bin/bird"],
+  ] as const) {
+    try {
+      await fs.access(wrapper, fs.constants.X_OK);
+      await fs.unlink(link).catch(() => {});
+      await fs.symlink(wrapper, link);
+    } catch {
+      // not installed yet — skip
+    }
+  }
+})();
 
 const app = new Hono();
 app.use("*", logger());
