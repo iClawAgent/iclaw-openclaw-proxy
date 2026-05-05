@@ -1,7 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── Module-level mocks (hoisted) ────────────────────────────────────────────
-const { mockExecFileAsync, mockFsRealpath, mockFsStat, mockFsMkdir, mockFsCp, mockFsRm, mockReadFileSync } =
+const {
+  mockExecFileAsync,
+  mockFsRealpath,
+  mockFsStat,
+  mockFsMkdir,
+  mockFsCp,
+  mockFsRm,
+  mockFsReadFile,
+  mockFsReaddir,
+  mockFsAccess,
+  mockReadFileSync,
+} =
   vi.hoisted(() => ({
     mockExecFileAsync: vi.fn(),
     mockFsRealpath: vi.fn(),
@@ -9,6 +20,9 @@ const { mockExecFileAsync, mockFsRealpath, mockFsStat, mockFsMkdir, mockFsCp, mo
     mockFsMkdir: vi.fn(),
     mockFsCp: vi.fn(),
     mockFsRm: vi.fn(),
+    mockFsReadFile: vi.fn(),
+    mockFsReaddir: vi.fn(),
+    mockFsAccess: vi.fn(),
     mockReadFileSync: vi.fn(),
   }));
 
@@ -27,9 +41,9 @@ vi.mock("node:fs/promises", () => ({
     mkdir: mockFsMkdir,
     cp: mockFsCp,
     rm: mockFsRm,
-    readdir: vi.fn().mockResolvedValue([]),
-    readFile: vi.fn().mockResolvedValue(""),
-    access: vi.fn().mockResolvedValue(undefined),
+    readdir: mockFsReaddir,
+    readFile: mockFsReadFile,
+    access: mockFsAccess,
   },
 }));
 
@@ -45,7 +59,9 @@ vi.mock("node:fs", () => ({
 vi.stubEnv("HOME", "/root");
 
 import {
+  getSkillsStatus,
   installSkillFromClawHub,
+  installSkillDependencyWithFallback,
   removeSkillFromWorkspace,
 } from "../services/gateway-rpc.js";
 
@@ -149,6 +165,9 @@ describe("installSkillFromClawHub — does not delete through symlink into canon
 describe("removeSkillFromWorkspace — does not double-delete through symlink", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
   });
 
   it("skips home-dir rm when it resolves to the same canonical path", async () => {
@@ -174,5 +193,177 @@ describe("removeSkillFromWorkspace — does not double-delete through symlink", 
     await removeSkillFromWorkspace("my-skill");
 
     expect(mockFsRm).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("removeSkillFromWorkspace — disables config before removing content", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockReadFileSync.mockReturnValue(JSON.stringify({ gateway: { auth: { token: "gw-token" } } }));
+    mockFsRealpath.mockResolvedValue(`${STATE_DIR}/skills`);
+    mockFsRm.mockResolvedValue(undefined);
+  });
+
+  it("calls skills.update best-effort before filesystem rm", async () => {
+    mockExecFileAsync.mockResolvedValue({ stdout: '{"ok":true,"skillKey":"my-skill"}', stderr: "" });
+
+    await removeSkillFromWorkspace("my-skill");
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "openclaw",
+      [
+        "gateway",
+        "call",
+        "skills.update",
+        "--params",
+        JSON.stringify({ skillKey: "my-skill", enabled: false }),
+        "--url",
+        "ws://127.0.0.1:18789",
+        "--token",
+        "gw-token",
+        "--json",
+        "--timeout",
+        "35000",
+      ],
+      expect.any(Object),
+    );
+    expect(mockFsRm).toHaveBeenCalled();
+  });
+
+  it("still removes files when the best-effort disable fails", async () => {
+    mockExecFileAsync.mockRejectedValue(new Error("gateway unavailable"));
+
+    await removeSkillFromWorkspace("my-skill");
+
+    expect(mockFsRm).toHaveBeenCalled();
+  });
+});
+
+describe("getSkillsStatus — augments gateway status from SKILL.md metadata", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockReadFileSync.mockReturnValue(JSON.stringify({ gateway: { auth: { token: "gw-token" } } }));
+  });
+
+  it("parses non-openclaw metadata namespaces, checks bins, and injects fallback install action", async () => {
+    mockExecFileAsync.mockImplementation(async (bin: string, args: string[]) => {
+      if (bin === "openclaw") {
+        return {
+          stdout: JSON.stringify({
+            workspaceDir: STATE_DIR,
+            skills: [{
+              name: "agent-browser",
+              description: "Browser skill",
+              eligible: true,
+              enabled: true,
+              source: "workspace",
+              filePath: `${STATE_DIR}/skills/agent-browser/SKILL.md`,
+            }],
+          }),
+          stderr: "",
+        };
+      }
+      if (bin === "which" && args[0] === "bird") {
+        throw new Error("not found");
+      }
+      if (bin === "which" && args[0] === "gog") {
+        return { stdout: "/usr/local/bin/gog", stderr: "" };
+      }
+      throw new Error(`unexpected command: ${bin}`);
+    });
+    mockFsReadFile.mockResolvedValue(`---
+name: agent-browser
+metadata: {"clawdbot":{"requires":{"commands":["bird"],"bins":["gog"]}}}
+---
+# agent-browser
+## Installation
+\`\`\`bash
+npm install -g agent-browser
+\`\`\`
+`);
+
+    const status = await getSkillsStatus();
+
+    expect(status.skills[0].missing?.bins).toEqual(["bird"]);
+    expect(status.skills[0].install).toEqual([
+      {
+        id: "fallback:agent-browser",
+        label: "Install dependencies (via SKILL.md)",
+        kind: "fallback",
+      },
+    ]);
+  });
+
+  it("does not read SKILL.md when gateway already reports bins or install actions", async () => {
+    mockExecFileAsync.mockResolvedValue({
+      stdout: JSON.stringify({
+        workspaceDir: STATE_DIR,
+        skills: [{
+          name: "agent-browser",
+          description: "Browser skill",
+          eligible: true,
+          enabled: true,
+          source: "workspace",
+          filePath: `${STATE_DIR}/skills/agent-browser/SKILL.md`,
+          missing: { bins: ["bird"] },
+          install: [{ id: "native:bird", label: "Install bird", kind: "native" }],
+        }],
+      }),
+      stderr: "",
+    });
+
+    const status = await getSkillsStatus();
+
+    expect(status.skills[0].missing?.bins).toEqual(["bird"]);
+    expect(status.skills[0].install?.[0].id).toBe("native:bird");
+    expect(mockFsReadFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("installSkillDependencyWithFallback — fallback policy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockReadFileSync.mockReturnValue(JSON.stringify({ gateway: { auth: { token: "gw-token" } } }));
+    mockFsAccess.mockResolvedValue(undefined);
+    mockFsReadFile.mockResolvedValue(`---
+name: agent-browser
+---
+## Install
+\`\`\`bash
+npm install -g agent-browser
+\`\`\`
+`);
+  });
+
+  it("uses the SKILL.md fallback only for no-install-options class gateway errors", async () => {
+    mockExecFileAsync.mockImplementation(async (bin: string) => {
+      if (bin === "openclaw") {
+        throw new Error("no_install_options");
+      }
+      if (bin === "npm") {
+        return { stdout: "ok", stderr: "" };
+      }
+      throw new Error(`unexpected command: ${bin}`);
+    });
+
+    const result = await installSkillDependencyWithFallback({
+      name: "agent-browser",
+      installId: "fallback:agent-browser",
+    });
+
+    expect(result.method).toBe("fallback_parser");
+    expect(result.ok).toBe(true);
+    expect(mockExecFileAsync).toHaveBeenCalledWith("npm", ["install", "-g", "agent-browser"], { timeout: 300_000 });
+  });
+
+  it("surfaces auth and connectivity failures without running fallback parser", async () => {
+    mockExecFileAsync.mockRejectedValue(new Error("unauthorized: gateway token rejected"));
+
+    await expect(installSkillDependencyWithFallback({
+      name: "agent-browser",
+      installId: "fallback:agent-browser",
+    })).rejects.toThrow("unauthorized");
+
+    expect(mockFsReadFile).not.toHaveBeenCalled();
   });
 });
