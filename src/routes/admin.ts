@@ -31,8 +31,7 @@ import {
   removeSkillFromWorkspace,
   getSkillsStatus,
   updateSkill,
-  installSkillDependency,
-  installSkillDependencyFallback,
+  installSkillDependencyWithFallback,
 } from "../services/gateway-rpc.js";
 import {
   listWorkspaceFiles,
@@ -243,18 +242,13 @@ adminRouter.post("/admin/skills/dep-install", async (c) => {
     return c.json({ error: "name and installId are required" }, 400);
   }
   try {
-    const result = await installSkillDependency({ name, installId, timeoutMs });
+    const result = await installSkillDependencyWithFallback({ name, installId, timeoutMs });
     return c.json(result);
-  } catch {
-    try {
-      const fallbackResult = await installSkillDependencyFallback(name);
-      return c.json(fallbackResult);
-    } catch (fbErr) {
-      const message =
-        fbErr instanceof Error ? fbErr.message : "dep_install_failed";
-      console.error("[sidecar] skills dep-install fallback failed:", message);
-      return c.json({ error: message }, 502);
-    }
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "dep_install_failed";
+    console.error("[sidecar] skills dep-install failed:", message);
+    return c.json({ error: message }, 502);
   }
 });
 

@@ -8,8 +8,29 @@ import {
   type GogSetupRequest,
   type GogOauthCompleteRequest,
 } from "../services/gog-skill.js";
+import {
+  getSkillsStatus,
+  installSkillDependencyWithFallback,
+  installSkillFromClawHub,
+  removeSkillFromWorkspace,
+  updateSkill,
+} from "../services/gateway-rpc.js";
 
 export const internalRouter = new Hono();
+
+const SKILL_SLUG_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+
+interface SkillsAdminActionTokenBody {
+  token: string;
+  instanceId: string;
+  tokenCallbackBaseUrl: string;
+}
+
+interface SkillsAdminActionPayload {
+  method: string;
+  path: string;
+  payload: unknown;
+}
 
 // ─── Gog token-exchange helpers ───────────────────────────────────────────────
 
@@ -37,6 +58,74 @@ async function fetchGogPayload(body: GogTokenBody): Promise<{ payload: unknown }
   return resp.json() as Promise<{ payload: unknown }>;
 }
 
+async function fetchSkillsAdminAction(
+  body: SkillsAdminActionTokenBody,
+): Promise<SkillsAdminActionPayload | null> {
+  const expectedBase = process.env.TOKEN_CALLBACK_BASE_URL;
+  if (!expectedBase || body.tokenCallbackBaseUrl !== expectedBase) return null;
+
+  const sidecarAdminToken = process.env.SIDECAR_ADMIN_TOKEN ?? "";
+  const url = `${body.tokenCallbackBaseUrl}/sidecar/skills/admin-action-token/${encodeURIComponent(body.token)}?instanceId=${encodeURIComponent(body.instanceId)}`;
+  const resp = await fetch(url, {
+    headers: { "X-Sidecar-Admin-Token": sidecarAdminToken },
+  });
+  if (!resp.ok) return null;
+  return resp.json() as Promise<SkillsAdminActionPayload>;
+}
+
+function objectPayload(payload: unknown): Record<string, unknown> {
+  return payload && typeof payload === "object"
+    ? payload as Record<string, unknown>
+    : {};
+}
+
+async function runSkillsAdminAction(action: SkillsAdminActionPayload): Promise<unknown> {
+  const method = action.method.toUpperCase();
+  const path = action.path;
+  const payload = objectPayload(action.payload);
+
+  if (method === "GET" && path === "/admin/skills/status") {
+    return getSkillsStatus();
+  }
+
+  if (method === "POST" && path === "/admin/skills/install") {
+    const slug = typeof payload.slug === "string" ? payload.slug : "";
+    if (!slug) throw new Error("slug is required");
+    if (!SKILL_SLUG_RE.test(slug)) throw new Error("invalid_slug");
+    return installSkillFromClawHub(slug);
+  }
+
+  if (method === "PATCH" && path === "/admin/skills/update") {
+    const skillKey = typeof payload.skillKey === "string" ? payload.skillKey : "";
+    if (!skillKey) throw new Error("skillKey is required");
+    return updateSkill({
+      skillKey,
+      enabled: typeof payload.enabled === "boolean" ? payload.enabled : undefined,
+      apiKey: typeof payload.apiKey === "string" ? payload.apiKey : undefined,
+      env: payload.env && typeof payload.env === "object"
+        ? payload.env as Record<string, string>
+        : undefined,
+    });
+  }
+
+  if (method === "POST" && path === "/admin/skills/dep-install") {
+    const name = typeof payload.name === "string" ? payload.name : "";
+    const installId = typeof payload.installId === "string" ? payload.installId : "";
+    const timeoutMs = typeof payload.timeoutMs === "number" ? payload.timeoutMs : undefined;
+    if (!name || !installId) throw new Error("name and installId are required");
+    return installSkillDependencyWithFallback({ name, installId, timeoutMs });
+  }
+
+  if (method === "DELETE" && path === "/admin/skills/uninstall") {
+    const slug = typeof payload.slug === "string" ? payload.slug : "";
+    if (!slug) throw new Error("slug is required");
+    if (!SKILL_SLUG_RE.test(slug)) throw new Error("invalid_slug");
+    return removeSkillFromWorkspace(slug);
+  }
+
+  throw new Error("unsupported_skills_admin_action");
+}
+
 function logFailedGogResult(context: string, result: unknown): void {
   if (!result || typeof result !== "object") return;
   const body = result as {
@@ -57,6 +146,35 @@ function logFailedGogResult(context: string, result: unknown): void {
     })),
   });
 }
+
+internalRouter.post("/internal/skills/admin-action-by-token", async (c) => {
+  const body = await c.req.json<SkillsAdminActionTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+
+  let action;
+  try {
+    action = await fetchSkillsAdminAction(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!action) return c.json({ error: "token_exchange_failed" }, 401);
+
+  try {
+    const result = await runSkillsAdminAction(action);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "skills_admin_action_failed";
+    return c.json({ error: code }, 502);
+  }
+});
 
 // POST /internal/skills/bird/setup-by-token
 //

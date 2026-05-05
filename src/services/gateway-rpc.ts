@@ -195,6 +195,13 @@ export async function removeSkillFromWorkspace(
 ): Promise<SkillContentRemoveResponse> {
   const stateDir = STATE_DIR;
 
+  try {
+    await updateSkill({ skillKey: slug, enabled: false });
+  } catch {
+    // Best-effort only: removed content is worse than a failed config cleanup.
+    // Continue so operators can recover by editing config or reinstalling.
+  }
+
   // Remove from canonical skill dir (STATE_DIR/skills/<slug>)
   const canonicalDir = path.join(stateDir, "skills", slug);
   const resolvedCanonical = path.resolve(canonicalDir);
@@ -411,6 +418,58 @@ export async function installSkillDependency(params: {
     { timeout: timeout + 5_000, env: gatewayEnv() },
   );
   return { ...JSON.parse(result.stdout), method: "gateway_rpc" };
+}
+
+function dependencyInstallErrorText(err: unknown): string {
+  const parts = [
+    err instanceof Error ? err.message : "",
+    (err as { stdout?: string }).stdout ?? "",
+    (err as { stderr?: string }).stderr ?? "",
+    (err as { code?: string }).code ?? "",
+  ];
+  return parts.join("\n").toLowerCase();
+}
+
+function shouldFallbackSkillDependencyInstall(err: unknown): boolean {
+  const text = dependencyInstallErrorText(err);
+  if (!text) return false;
+
+  const hardFailures = [
+    "timeout",
+    "timed out",
+    "unauthorized",
+    "forbidden",
+    "auth",
+    "token",
+    "econnrefused",
+    "econnreset",
+    "enotfound",
+    "socket hang up",
+    "connection",
+  ];
+  if (hardFailures.some((marker) => text.includes(marker))) return false;
+
+  return (
+    text.includes("not_found") ||
+    text.includes("not found") ||
+    text.includes("no_install_options") ||
+    text.includes("no install options")
+  );
+}
+
+export async function installSkillDependencyWithFallback(params: {
+  name: string;
+  installId: string;
+  timeoutMs?: number;
+}): Promise<SkillDepInstallResponse> {
+  try {
+    return await installSkillDependency(params);
+  } catch (err) {
+    if (!shouldFallbackSkillDependencyInstall(err)) {
+      throw err;
+    }
+    return installSkillDependencyFallback(params.name);
+  }
 }
 
 // ---------------------------------------------------------------------------
