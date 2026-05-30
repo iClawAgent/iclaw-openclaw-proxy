@@ -3,7 +3,7 @@ import type { Context } from "hono";
 import {
   getLlmApiKey,
   getLlmBaseUrl,
-  getLlmProvider,
+  getLlmApiStyle,
 } from "../env.js";
 import { checkSidecarQuota } from "../services/quota.js";
 
@@ -61,9 +61,10 @@ async function forwardToUpstream(c: Context): Promise<Response> {
   }
 
   const authToken = getLlmApiKey();
-  const provider = getLlmProvider();
-  if (provider === "anthropic") {
+  const apiStyle = getLlmApiStyle();
+  if (apiStyle === "anthropic") {
     headers.set("x-api-key", authToken);
+    headers.set("anthropic-version", "2023-06-01");
   } else {
     headers.set("Authorization", `Bearer ${authToken}`);
   }

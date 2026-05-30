@@ -7,6 +7,8 @@ import {
   setLlmCredentials,
   setLlmAuthMode,
   setLlmProvider,
+  seedKeyring,
+  hasKeyringEntry,
   getCodexOAuthStatus,
 } from "../env.js";
 import {
@@ -59,11 +61,33 @@ import {
 export const adminRouter = new Hono();
 
 adminRouter.post("/admin/rotate-key", async (c) => {
-  const body = await c.req.json<{ apiKey: string; upstreamUrl?: string }>();
+  const body = await c.req.json<{
+    apiKey: string;
+    upstreamUrl?: string;
+    provider?: string;
+    apiStyle?: "openai" | "anthropic";
+  }>();
   if (!body.apiKey) {
     return c.json({ error: "apiKey is required" }, 400);
   }
-  setLlmCredentials(body.apiKey, body.upstreamUrl);
+  if (body.provider) {
+    setLlmCredentials(body.provider, body.apiKey, body.upstreamUrl, body.apiStyle);
+  } else {
+    // Legacy path: update active provider's credentials
+    setLlmCredentials(body.apiKey, body.upstreamUrl);
+  }
+  return c.json({ ok: true });
+});
+
+adminRouter.post("/admin/llm-keyring", async (c) => {
+  const body = await c.req.json<{
+    entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" }>;
+    activeProvider?: string;
+  }>();
+  if (!Array.isArray(body.entries)) {
+    return c.json({ error: "entries must be an array" }, 400);
+  }
+  seedKeyring(body.entries, body.activeProvider);
   return c.json({ ok: true });
 });
 
@@ -88,14 +112,19 @@ adminRouter.post("/admin/set-auth-mode", async (c) => {
 });
 
 adminRouter.post("/admin/set-provider", async (c) => {
-  const { provider, upstreamUrl } = await c.req.json<{
+  const { provider, upstreamUrl, apiStyle } = await c.req.json<{
     provider: string;
     upstreamUrl?: string;
+    apiStyle?: "openai" | "anthropic";
   }>();
   if (!provider) {
     return c.json({ error: "provider is required" }, 400);
   }
-  setLlmProvider(provider, upstreamUrl);
+  // Reject switch if the target provider has no cached key and none is being supplied
+  if (!hasKeyringEntry(provider)) {
+    return c.json({ error: "missing_key_for_provider", provider }, 409);
+  }
+  setLlmProvider(provider, upstreamUrl, apiStyle);
   return c.json({ ok: true });
 });
 

@@ -12,6 +12,7 @@ vi.mock("../env.js", () => ({
   getLlmApiKey: () => "sk-real-key",
   getLlmBaseUrl: () => "https://api.openai.com",
   getLlmProvider: () => "openai",
+  getLlmApiStyle: () => "openai",
 }));
 
 const { proxyRouter } = await import("../routes/proxy.js");
