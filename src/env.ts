@@ -15,8 +15,14 @@ import {
 type Cred = {
   apiKey: string;
   baseUrl: string;
-  /** Sidecar-local copy of provider auth style. No @iclawagent/shared import. */
-  apiStyle: "openai" | "anthropic";
+  /**
+   * Sidecar-local copy of provider auth/header mode. No @iclawagent/shared import.
+   * - "openai": Authorization: Bearer <key>
+   * - "anthropic": x-api-key + anthropic-version
+   * - "google-generative-ai": x-goog-api-key
+   * Does NOT imply sidecar translation.
+   */
+  apiStyle: "openai" | "anthropic" | "google-generative-ai";
 };
 
 const keyring = new Map<string, Cred>();
@@ -46,9 +52,10 @@ export function validateEnv(): void {
   }
 
   // Seed the active provider into the keyring from boot env.
-  // apiStyle defaults to "anthropic" for "anthropic", "openai" for everything else.
-  const bootApiStyle: "openai" | "anthropic" =
-    activeProvider === "anthropic" ? "anthropic" : "openai";
+  const bootApiStyle: "openai" | "anthropic" | "google-generative-ai" =
+    activeProvider === "anthropic" ? "anthropic"
+    : activeProvider === "google" ? "google-generative-ai"
+    : "openai";
   keyring.set(activeProvider, {
     apiKey: bootApiKey,
     baseUrl: bootBaseUrl,
@@ -68,7 +75,7 @@ export function getLlmBaseUrl(): string {
   return keyring.get(activeProvider)?.baseUrl ?? "https://api.openai.com";
 }
 
-export function getLlmApiStyle(): "openai" | "anthropic" {
+export function getLlmApiStyle(): "openai" | "anthropic" | "google-generative-ai" {
   return keyring.get(activeProvider)?.apiStyle ?? "openai";
 }
 
@@ -88,7 +95,7 @@ export function getLlmProvider(): string {
 export function setLlmProvider(
   provider: string,
   upstreamUrl?: string,
-  apiStyle?: "openai" | "anthropic",
+  apiStyle?: "openai" | "anthropic" | "google-generative-ai",
 ): void {
   const existing = keyring.get(provider);
   if (existing) {
@@ -132,31 +139,36 @@ export function setLlmCredentials(
   apiKeyOrProvider: string,
   baseUrlOrApiKey?: string,
   apiStyleOrBaseUrl?: string,
-  apiStyle?: "openai" | "anthropic",
+  apiStyle?: "openai" | "anthropic" | "google-generative-ai",
 ): void {
   // Overload 1 (new): setLlmCredentials(provider, apiKey, baseUrl?, apiStyle?)
   // Overload 2 (legacy): setLlmCredentials(apiKey, baseUrl?)
   // Distinguish by checking if the first arg is a known provider-like string.
   // Since this is a sidecar-local file, we keep the provider list local.
-  const KNOWN_PROVIDERS = new Set(["openai", "anthropic", "openrouter", "google"]);
+  const KNOWN_PROVIDERS = new Set(["openai", "anthropic", "openrouter", "google", "deepseek"]);
 
   let provider: string;
   let apiKey: string;
   let baseUrl: string | undefined;
-  let style: "openai" | "anthropic";
+  let style: "openai" | "anthropic" | "google-generative-ai";
 
   if (KNOWN_PROVIDERS.has(apiKeyOrProvider) && baseUrlOrApiKey !== undefined) {
     // New multi-arg form: (provider, apiKey, baseUrl?, apiStyle?)
     provider = apiKeyOrProvider;
     apiKey = baseUrlOrApiKey;
     baseUrl = apiStyleOrBaseUrl;
-    style = (apiStyle ?? (provider === "anthropic" ? "anthropic" : "openai"));
+    style = (apiStyle ?? (provider === "anthropic" ? "anthropic" : provider === "google" ? "google-generative-ai" : "openai"));
   } else {
     // Legacy form: (apiKey, baseUrl?)
     provider = activeProvider;
     apiKey = apiKeyOrProvider;
     baseUrl = baseUrlOrApiKey;
-    style = apiStyleOrBaseUrl === "anthropic" ? "anthropic" : (keyring.get(provider)?.apiStyle ?? "openai");
+    const existingStyle = keyring.get(provider)?.apiStyle;
+    style = apiStyleOrBaseUrl === "anthropic"
+      ? "anthropic"
+      : apiStyleOrBaseUrl === "google-generative-ai"
+      ? "google-generative-ai"
+      : (existingStyle ?? "openai");
   }
 
   const existing = keyring.get(provider);
@@ -172,15 +184,22 @@ export function setLlmCredentials(
  * Bulk-seed the keyring from a list of entries. Optionally flips activeProvider.
  */
 export function seedKeyring(
-  entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" }>,
+  entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" | "google-generative-ai" }>,
   newActiveProvider?: string,
 ): void {
   for (const entry of entries) {
-    const style: "openai" | "anthropic" =
-      entry.apiStyle ?? (entry.provider === "anthropic" ? "anthropic" : "openai");
+    const defaultStyle: "openai" | "anthropic" | "google-generative-ai" =
+      entry.provider === "anthropic" ? "anthropic"
+      : entry.provider === "google" ? "google-generative-ai"
+      : "openai";
+    const style: "openai" | "anthropic" | "google-generative-ai" = entry.apiStyle ?? defaultStyle;
+    const defaultBaseUrl =
+      entry.provider === "anthropic" ? "https://api.anthropic.com"
+      : entry.provider === "google" ? "https://generativelanguage.googleapis.com/v1beta"
+      : "https://api.openai.com";
     keyring.set(entry.provider, {
       apiKey: entry.apiKey,
-      baseUrl: entry.baseUrl ?? (entry.provider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com"),
+      baseUrl: entry.baseUrl ?? defaultBaseUrl,
       apiStyle: style,
     });
   }

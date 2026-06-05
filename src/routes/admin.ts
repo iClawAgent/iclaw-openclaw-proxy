@@ -65,7 +65,7 @@ adminRouter.post("/admin/rotate-key", async (c) => {
     apiKey: string;
     upstreamUrl?: string;
     provider?: string;
-    apiStyle?: "openai" | "anthropic";
+    apiStyle?: "openai" | "anthropic" | "google-generative-ai";
   }>();
   if (!body.apiKey) {
     return c.json({ error: "apiKey is required" }, 400);
@@ -79,13 +79,18 @@ adminRouter.post("/admin/rotate-key", async (c) => {
   return c.json({ ok: true });
 });
 
+const LLM_KEYRING_MAX_ENTRIES = 32;
+
 adminRouter.post("/admin/llm-keyring", async (c) => {
   const body = await c.req.json<{
-    entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" }>;
+    entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" | "google-generative-ai" }>;
     activeProvider?: string;
   }>();
   if (!Array.isArray(body.entries)) {
     return c.json({ error: "entries must be an array" }, 400);
+  }
+  if (body.entries.length > LLM_KEYRING_MAX_ENTRIES) {
+    return c.json({ error: "too_many_entries", max: LLM_KEYRING_MAX_ENTRIES }, 400);
   }
   seedKeyring(body.entries, body.activeProvider);
   return c.json({ ok: true });
@@ -115,7 +120,7 @@ adminRouter.post("/admin/set-provider", async (c) => {
   const { provider, upstreamUrl, apiStyle } = await c.req.json<{
     provider: string;
     upstreamUrl?: string;
-    apiStyle?: "openai" | "anthropic";
+    apiStyle?: "openai" | "anthropic" | "google-generative-ai";
   }>();
   if (!provider) {
     return c.json({ error: "provider is required" }, 400);

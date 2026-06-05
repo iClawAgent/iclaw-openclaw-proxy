@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { Hono } from "hono";
 
 // Reset env module state between tests by re-importing fresh each time.
 // We stub process.env before each import.
@@ -71,5 +72,99 @@ describe("sidecar keyring", () => {
       { provider: "anthropic", apiKey: "sk-ant", baseUrl: "https://api.anthropic.com", apiStyle: "anthropic" },
     ], "anthropic");
     expect(env.getLlmApiStyle()).toBe("anthropic");
+  });
+
+  it("seedKeyring sets google-generative-ai apiStyle for google provider", async () => {
+    const env = await loadEnv();
+    env.seedKeyring([
+      { provider: "google", apiKey: "AIza-test", baseUrl: "https://generativelanguage.googleapis.com/v1beta" },
+    ], "google");
+    expect(env.getLlmApiStyle()).toBe("google-generative-ai");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin route: /admin/set-provider 409 when no key cached
+// ---------------------------------------------------------------------------
+
+describe("sidecar admin set-provider route", () => {
+  let adminRouter: Hono;
+  let app: Hono;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.doMock("../services/codex-oauth.js", () => ({
+      loadPersistedTokens: vi.fn().mockReturnValue(null),
+    }));
+    vi.doMock("../services/backup.js", () => ({}));
+    vi.doMock("../services/quota.js", () => ({ syncQuota: vi.fn(), getQuotaStatus: vi.fn() }));
+    vi.doMock("../services/gateway-rpc.js", () => ({}));
+    vi.doMock("../services/workspace-files.js", () => ({}));
+    vi.doMock("../services/bird-skill.js", () => ({}));
+    vi.doMock("../services/gog-skill.js", () => ({}));
+    // Set required env
+    process.env.MEMBER_ID = "test-member";
+    process.env.SIDECAR_ADMIN_TOKEN = "test-admin-token";
+    process.env.LLM_PROVIDER = "openai";
+    process.env.LLM_BASE_URL = "https://api.openai.com";
+    process.env.LLM_API_KEY = "sk-openai-boot";
+    process.env.LLM_AUTH_MODE = "api_key";
+
+    const envMod = await import("../env.js");
+    envMod.validateEnv();
+
+    const { adminRouter: router } = await import("../routes/admin.js");
+    adminRouter = router as unknown as Hono;
+    app = new Hono();
+    // Bypass admin auth for unit tests
+    app.route("/", adminRouter);
+  });
+
+  afterEach(() => {
+    vi.resetModules();
+  });
+
+  it("returns 409 missing_key_for_provider when switching to a provider with no cached key", async () => {
+    // Boot env seeds openai; anthropic has no key yet.
+    const res = await app.request("/admin/set-provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "anthropic" }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; provider: string };
+    expect(body.error).toBe("missing_key_for_provider");
+    expect(body.provider).toBe("anthropic");
+  });
+
+  it("succeeds when switching to a provider that has a cached key", async () => {
+    const envMod = await import("../env.js");
+    envMod.setLlmCredentials("anthropic", "sk-ant", "https://api.anthropic.com", "anthropic");
+
+    const res = await app.request("/admin/set-provider", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "anthropic" }),
+    });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("llm-keyring rejects oversized payloads (more than 32 entries)", async () => {
+    const entries = Array.from({ length: 33 }, (_, i) => ({
+      provider: `provider-${i}`,
+      apiKey: `sk-${i}`,
+    }));
+
+    const res = await app.request("/admin/llm-keyring", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entries }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("too_many_entries");
   });
 });

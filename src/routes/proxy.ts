@@ -9,8 +9,7 @@ import { checkSidecarQuota } from "../services/quota.js";
 
 export const proxyRouter = new Hono();
 
-// POST /v1/chat/completions — quota-gated
-proxyRouter.post("/v1/chat/completions", async (c) => {
+async function quotaGateAndForward(c: Parameters<typeof forwardToUpstream>[0]): Promise<Response> {
   const quota = await checkSidecarQuota();
 
   if (!quota.allowed) {
@@ -32,7 +31,13 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   }
 
   return forwardToUpstream(c);
-});
+}
+
+// POST /v1/chat/completions — quota-gated (OpenAI / OpenRouter / DeepSeek)
+proxyRouter.post("/v1/chat/completions", (c) => quotaGateAndForward(c));
+
+// POST /v1/messages — quota-gated (Anthropic native Messages API)
+proxyRouter.post("/v1/messages", (c) => quotaGateAndForward(c));
 
 // All other /v1/* (models, embeddings, etc.) — pass-through, no quota
 proxyRouter.all("/v1/*", (c) => forwardToUpstream(c));
@@ -44,7 +49,21 @@ proxyRouter.all("/v1/*", (c) => forwardToUpstream(c));
 
 async function forwardToUpstream(c: Context): Promise<Response> {
   const reqPath = c.req.path;
-  const target = new URL(reqPath, getLlmBaseUrl());
+  const baseUrl = getLlmBaseUrl();
+  const apiStyle = getLlmApiStyle();
+
+  // For google-generative-ai, OpenClaw emits paths under /v1/* but the native
+  // Gemini base is /v1beta. Strip the /v1 prefix so /v1/models/… becomes
+  // /v1beta/models/… when joined with the base URL path.
+  let upstreamPath = reqPath;
+  if (apiStyle === "google-generative-ai" && reqPath.startsWith("/v1/")) {
+    upstreamPath = reqPath.slice("/v1".length); // "/models/…"
+  }
+
+  const baseParsed = new URL(baseUrl);
+  const basePath = baseParsed.pathname.replace(/\/$/, "");
+  baseParsed.pathname = basePath + upstreamPath;
+  const target = baseParsed;
   target.search = new URL(c.req.url).search;
 
   const headers = new Headers();
@@ -54,18 +73,21 @@ async function forwardToUpstream(c: Context): Promise<Response> {
       lower === "host" ||
       lower === "connection" ||
       lower === "authorization" ||
-      lower === "x-api-key"
+      lower === "x-api-key" ||
+      lower === "x-goog-api-key"
     )
       continue;
     headers.set(k, v);
   }
 
   const authToken = getLlmApiKey();
-  const apiStyle = getLlmApiStyle();
   if (apiStyle === "anthropic") {
     headers.set("x-api-key", authToken);
     headers.set("anthropic-version", "2023-06-01");
+  } else if (apiStyle === "google-generative-ai") {
+    headers.set("x-goog-api-key", authToken);
   } else {
+    // "openai" style: OpenAI, OpenRouter, DeepSeek — all use Bearer auth
     headers.set("Authorization", `Bearer ${authToken}`);
   }
 
