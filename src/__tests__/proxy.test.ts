@@ -238,6 +238,71 @@ describe("proxy router", () => {
     });
   });
 
+  describe("POST /v1/models/*:generateContent (Google Gemini — quota-gated)", () => {
+    it("returns 429 when quota exhausted on streamGenerateContent path", async () => {
+      mockCheckSidecarQuota.mockResolvedValue({
+        allowed: false,
+        remaining: 0,
+        plan: "free_trial",
+        trialExpired: false,
+        resetAt: "1700000000000",
+      });
+
+      const res = await proxyRouter.request(
+        "/v1/models/gemini-2.5-flash:streamGenerateContent",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [] }),
+        },
+      );
+
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("quota_exceeded");
+      expect(res.headers.get("x-should-retry")).toBe("false");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("returns 429 when quota exhausted on generateContent path", async () => {
+      mockCheckSidecarQuota.mockResolvedValue({
+        allowed: false,
+        remaining: 0,
+        plan: "free_trial",
+        trialExpired: false,
+      });
+
+      const res = await proxyRouter.request(
+        "/v1/models/gemini-2.5-flash:generateContent",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [] }),
+        },
+      );
+
+      expect(res.status).toBe(429);
+      const body = (await res.json()) as { error: { code: string } };
+      expect(body.error.code).toBe("quota_exceeded");
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("passes through POST /v1/models without quota gate (non-inference path)", async () => {
+      // e.g. a model-info GET would fall through; a POST to a non-generate path
+      // (hypothetical) should also be passed through without quota check.
+      const res = await proxyRouter.request("/v1/models/gemini-2.5-flash", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+
+      // quota mock was never set up for this test — if quota were called it would throw
+      expect(mockCheckSidecarQuota).not.toHaveBeenCalled();
+      // upstream fetch is called (pass-through)
+      expect(mockFetch).toHaveBeenCalled();
+    });
+  });
+
   describe("provider path composition", () => {
     beforeEach(() => {
       mockCheckSidecarQuota.mockResolvedValue({

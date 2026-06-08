@@ -39,7 +39,17 @@ proxyRouter.post("/v1/chat/completions", (c) => quotaGateAndForward(c));
 // POST /v1/messages — quota-gated (Anthropic native Messages API)
 proxyRouter.post("/v1/messages", (c) => quotaGateAndForward(c));
 
-// All other /v1/* (models, embeddings, etc.) — pass-through, no quota
+// POST /v1/models/*:generateContent and *:streamGenerateContent — quota-gated (Google Gemini native inference)
+// Must be registered before the catch-all so Hono matches these in order.
+proxyRouter.post("/v1/models/*", (c) => {
+  const path = c.req.path;
+  if (path.endsWith(":generateContent") || path.endsWith(":streamGenerateContent")) {
+    return quotaGateAndForward(c);
+  }
+  return forwardToUpstream(c);
+});
+
+// All other /v1/* (models list, embeddings, etc.) — pass-through, no quota
 proxyRouter.all("/v1/*", (c) => forwardToUpstream(c));
 
 // ---------------------------------------------------------------------------
