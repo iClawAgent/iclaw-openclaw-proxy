@@ -10,6 +10,9 @@ import {
   seedKeyring,
   hasKeyringEntry,
   getCodexOAuthStatus,
+  getKeyringSize,
+  isActiveProviderKeyed,
+  getLlmProvider,
 } from "../env.js";
 import {
   createBackupTarball,
@@ -94,6 +97,19 @@ adminRouter.post("/admin/llm-keyring", async (c) => {
   }
   seedKeyring(body.entries, body.activeProvider);
   return c.json({ ok: true });
+});
+
+/**
+ * GET /admin/llm-keyring/status
+ * Returns keyring state WITHOUT key material. Safe to call on every health tick.
+ * Response: { entryCount, activeProvider, activeHasKey }
+ */
+adminRouter.get("/admin/llm-keyring/status", (c) => {
+  return c.json({
+    entryCount: getKeyringSize(),
+    activeProvider: getLlmProvider(),
+    activeHasKey: isActiveProviderKeyed(),
+  });
 });
 
 adminRouter.post("/admin/quota-sync", async (c) => {

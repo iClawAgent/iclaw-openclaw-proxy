@@ -66,6 +66,26 @@ describe("sidecar keyring", () => {
     expect(env.getLlmApiKey()).toBe("");
   });
 
+  it("getKeyringSize returns the number of keyring entries", async () => {
+    const env = await loadEnv();
+    // Boot env seeds 1 entry (openai)
+    expect(env.getKeyringSize()).toBe(1);
+    env.setLlmCredentials("anthropic", "sk-ant", "https://api.anthropic.com", "anthropic");
+    expect(env.getKeyringSize()).toBe(2);
+  });
+
+  it("isActiveProviderKeyed returns true when active provider has a key", async () => {
+    const env = await loadEnv();
+    expect(env.isActiveProviderKeyed()).toBe(true);
+  });
+
+  it("isActiveProviderKeyed returns false when active provider has an empty key", async () => {
+    process.env.LLM_API_KEY = "";
+    process.env.LLM_AUTH_MODE = "codex_oauth"; // allows empty key
+    const env = await loadEnv();
+    expect(env.isActiveProviderKeyed()).toBe(false);
+  });
+
   it("getLlmApiStyle returns anthropic for anthropic provider", async () => {
     const env = await loadEnv();
     env.seedKeyring([
@@ -149,6 +169,26 @@ describe("sidecar admin set-provider route", () => {
     });
 
     expect(res.status).toBe(200);
+  });
+
+  it("GET /admin/llm-keyring/status returns entryCount, activeProvider, activeHasKey — no key material", async () => {
+    const res = await app.request("/admin/llm-keyring/status", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+
+    // Must return counts and active provider name — no key material
+    expect(typeof body.entryCount).toBe("number");
+    expect(typeof body.activeProvider).toBe("string");
+    expect(typeof body.activeHasKey).toBe("boolean");
+
+    // Critically: no apiKey, no baseUrl with secrets, no key material
+    expect(body.apiKey).toBeUndefined();
+    expect(body.key).toBeUndefined();
+    expect(body.entries).toBeUndefined();
   });
 
   it("llm-keyring rejects oversized payloads (more than 32 entries)", async () => {

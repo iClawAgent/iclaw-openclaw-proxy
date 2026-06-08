@@ -214,6 +214,21 @@ export function hasKeyringEntry(provider: string): boolean {
   return Boolean(cred && cred.apiKey);
 }
 
+/**
+ * Returns the number of entries currently in the keyring (no key material exposed).
+ */
+export function getKeyringSize(): number {
+  return keyring.size;
+}
+
+/**
+ * Returns true if the active provider has a non-empty apiKey in the keyring.
+ */
+export function isActiveProviderKeyed(): boolean {
+  const cred = keyring.get(activeProvider);
+  return Boolean(cred && cred.apiKey);
+}
+
 export function getMemberId(): string {
   return memberId;
 }
