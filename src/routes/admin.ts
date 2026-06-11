@@ -69,12 +69,13 @@ adminRouter.post("/admin/rotate-key", async (c) => {
     upstreamUrl?: string;
     provider?: string;
     apiStyle?: "openai" | "anthropic" | "google-generative-ai";
+    requiredAuth?: Record<string, string>;
   }>();
   if (!body.apiKey) {
     return c.json({ error: "apiKey is required" }, 400);
   }
   if (body.provider) {
-    setLlmCredentials(body.provider, body.apiKey, body.upstreamUrl, body.apiStyle);
+    setLlmCredentials(body.provider, body.apiKey, body.upstreamUrl, body.apiStyle, body.requiredAuth);
   } else {
     // Legacy path: update active provider's credentials
     setLlmCredentials(body.apiKey, body.upstreamUrl);

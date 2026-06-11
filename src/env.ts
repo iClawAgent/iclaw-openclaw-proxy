@@ -23,6 +23,12 @@ type Cred = {
    * Does NOT imply sidecar translation.
    */
   apiStyle: "openai" | "anthropic" | "google-generative-ai";
+  /**
+   * Provider-specific headers to stamp on outbound requests.
+   * e.g. { "HTTP-Referer": "https://…", "X-Title": "iClawAgent" } for OpenRouter.
+   * No @iclawagent/shared import — sidecar-local parallel type.
+   */
+  requiredAuth?: Record<string, string>;
 };
 
 const keyring = new Map<string, Cred>();
@@ -77,6 +83,14 @@ export function getLlmBaseUrl(): string {
 
 export function getLlmApiStyle(): "openai" | "anthropic" | "google-generative-ai" {
   return keyring.get(activeProvider)?.apiStyle ?? "openai";
+}
+
+/**
+ * Returns the requiredAuth headers for the active provider (e.g. HTTP-Referer for OpenRouter).
+ * Returns undefined if no requiredAuth is configured.
+ */
+export function getRequiredAuthHeaders(): Record<string, string> | undefined {
+  return keyring.get(activeProvider)?.requiredAuth;
 }
 
 export function getLlmAuthMode(): string {
@@ -140,8 +154,9 @@ export function setLlmCredentials(
   baseUrlOrApiKey?: string,
   apiStyleOrBaseUrl?: string,
   apiStyle?: "openai" | "anthropic" | "google-generative-ai",
+  requiredAuth?: Record<string, string>,
 ): void {
-  // Overload 1 (new): setLlmCredentials(provider, apiKey, baseUrl?, apiStyle?)
+  // Overload 1 (new): setLlmCredentials(provider, apiKey, baseUrl?, apiStyle?, requiredAuth?)
   // Overload 2 (legacy): setLlmCredentials(apiKey, baseUrl?)
   // Distinguish by checking if the first arg is a known provider-like string.
   // Since this is a sidecar-local file, we keep the provider list local.
@@ -153,7 +168,7 @@ export function setLlmCredentials(
   let style: "openai" | "anthropic" | "google-generative-ai";
 
   if (KNOWN_PROVIDERS.has(apiKeyOrProvider) && baseUrlOrApiKey !== undefined) {
-    // New multi-arg form: (provider, apiKey, baseUrl?, apiStyle?)
+    // New multi-arg form: (provider, apiKey, baseUrl?, apiStyle?, requiredAuth?)
     provider = apiKeyOrProvider;
     apiKey = baseUrlOrApiKey;
     baseUrl = apiStyleOrBaseUrl;
@@ -172,10 +187,15 @@ export function setLlmCredentials(
   }
 
   const existing = keyring.get(provider);
+  // Preserve existing requiredAuth if the caller does not supply a new one.
+  // This prevents /admin/rotate-key from silently erasing attribution headers
+  // that were set by the initial /admin/llm-keyring seed.
+  const resolvedRequiredAuth = requiredAuth ?? existing?.requiredAuth;
   keyring.set(provider, {
     apiKey,
     baseUrl: baseUrl ?? existing?.baseUrl ?? "https://api.openai.com",
     apiStyle: style,
+    ...(resolvedRequiredAuth !== undefined ? { requiredAuth: resolvedRequiredAuth } : {}),
   });
   console.log(`[sidecar] Credentials set for provider: ${provider}`);
 }
@@ -184,7 +204,13 @@ export function setLlmCredentials(
  * Bulk-seed the keyring from a list of entries. Optionally flips activeProvider.
  */
 export function seedKeyring(
-  entries: Array<{ provider: string; apiKey: string; baseUrl?: string; apiStyle?: "openai" | "anthropic" | "google-generative-ai" }>,
+  entries: Array<{
+    provider: string;
+    apiKey: string;
+    baseUrl?: string;
+    apiStyle?: "openai" | "anthropic" | "google-generative-ai";
+    requiredAuth?: Record<string, string>;
+  }>,
   newActiveProvider?: string,
 ): void {
   for (const entry of entries) {
@@ -201,6 +227,7 @@ export function seedKeyring(
       apiKey: entry.apiKey,
       baseUrl: entry.baseUrl ?? defaultBaseUrl,
       apiStyle: style,
+      requiredAuth: entry.requiredAuth,
     });
   }
   if (newActiveProvider) {

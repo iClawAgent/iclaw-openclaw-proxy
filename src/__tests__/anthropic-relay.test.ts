@@ -35,6 +35,10 @@ vi.mock("../env.js", () => ({
   getLlmBaseUrl: mockGetLlmBaseUrl,
   getLlmProvider: () => "anthropic",
   getLlmApiStyle: mockGetLlmApiStyle,
+  // Empty-key guard: always keyed in Anthropic relay tests
+  isActiveProviderKeyed: () => true,
+  // Anthropic does not use requiredAuth attribution headers
+  getRequiredAuthHeaders: () => undefined,
 }));
 
 const { proxyRouter } = await import("../routes/proxy.js");

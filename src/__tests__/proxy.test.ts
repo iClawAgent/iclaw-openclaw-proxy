@@ -15,6 +15,8 @@ vi.mock("../env.js", () => ({
   getLlmBaseUrl: mockGetLlmBaseUrl,
   getLlmProvider: () => "openai",
   getLlmApiStyle: mockGetLlmApiStyle,
+  isActiveProviderKeyed: () => true,
+  getRequiredAuthHeaders: () => undefined,
 }));
 
 const { proxyRouter } = await import("../routes/proxy.js");

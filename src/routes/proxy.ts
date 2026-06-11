@@ -4,12 +4,29 @@ import {
   getLlmApiKey,
   getLlmBaseUrl,
   getLlmApiStyle,
+  getRequiredAuthHeaders,
+  isActiveProviderKeyed,
 } from "../env.js";
 import { checkSidecarQuota } from "../services/quota.js";
 
 export const proxyRouter = new Hono();
 
 async function quotaGateAndForward(c: Parameters<typeof forwardToUpstream>[0]): Promise<Response> {
+  // Empty-key fail-fast: reject before any upstream call when no key is seeded.
+  // This guards the window between setLlmProvider (placeholder) and seed/rotate.
+  if (!isActiveProviderKeyed()) {
+    return c.json(
+      {
+        error: {
+          message: "LLM API key not configured. Please set your API key in settings.",
+          type: "configuration_error",
+          code: "llm_key_not_configured",
+        },
+      },
+      { status: 400, headers: { "x-should-retry": "false" } },
+    );
+  }
+
   const quota = await checkSidecarQuota();
 
   if (!quota.allowed) {
@@ -99,6 +116,15 @@ async function forwardToUpstream(c: Context): Promise<Response> {
   } else {
     // "openai" style: OpenAI, OpenRouter, DeepSeek — all use Bearer auth
     headers.set("Authorization", `Bearer ${authToken}`);
+  }
+
+  // Stamp provider-required attribution headers (e.g. HTTP-Referer + X-Title for OpenRouter).
+  // These are injected only when the keyring entry carries them; never from inbound requests.
+  const requiredAuth = getRequiredAuthHeaders();
+  if (requiredAuth) {
+    for (const [k, v] of Object.entries(requiredAuth)) {
+      headers.set(k, v);
+    }
   }
 
   try {
