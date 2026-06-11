@@ -232,3 +232,84 @@ describe("POST /internal/skills/admin-action-by-token — generic Skills token r
     expect(mockGetSkillsStatus).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /internal/admin-action-by-token — generic sidecar admin relay", () => {
+  const originalTokenCallbackUrl = process.env.TOKEN_CALLBACK_BASE_URL;
+  const originalSidecarToken = process.env.SIDECAR_ADMIN_TOKEN;
+  const originalPort = process.env.PORT;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("fetch", mockFetch);
+    process.env.TOKEN_CALLBACK_BASE_URL = "https://api.iclawagent.com";
+    process.env.SIDECAR_ADMIN_TOKEN = "sidecar-token";
+    process.env.PORT = "8080";
+  });
+
+  afterEach(() => {
+    if (originalTokenCallbackUrl !== undefined) {
+      process.env.TOKEN_CALLBACK_BASE_URL = originalTokenCallbackUrl;
+    } else {
+      delete process.env.TOKEN_CALLBACK_BASE_URL;
+    }
+    if (originalSidecarToken !== undefined) {
+      process.env.SIDECAR_ADMIN_TOKEN = originalSidecarToken;
+    } else {
+      delete process.env.SIDECAR_ADMIN_TOKEN;
+    }
+    if (originalPort !== undefined) {
+      process.env.PORT = originalPort;
+    } else {
+      delete process.env.PORT;
+    }
+    vi.stubGlobal("fetch", originalFetch);
+  });
+
+  async function makeApp() {
+    const { internalRouter } = await import("../routes/internal.js");
+    const app = new Hono();
+    app.route("/", internalRouter);
+    return app;
+  }
+
+  it("redeems token then calls the local protected admin route", async () => {
+    mockFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        method: "POST",
+        path: "/admin/set-provider",
+        payload: {
+          provider: "anthropic",
+          upstreamUrl: "https://api.anthropic.com",
+          apiStyle: "anthropic",
+        },
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const app = await makeApp();
+    const res = await app.request("/internal/admin-action-by-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: "action-token",
+        instanceId: "inst-1",
+        tokenCallbackBaseUrl: "https://api.iclawagent.com",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(String(mockFetch.mock.calls[0][0])).toContain("/sidecar/skills/admin-action-token/action-token");
+    expect(mockFetch.mock.calls[1][0]).toBe("http://127.0.0.1:8080/admin/set-provider");
+    const localInit = mockFetch.mock.calls[1][1] as RequestInit;
+    expect(localInit.headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Admin-Token": "sidecar-token",
+    });
+    expect(JSON.parse(localInit.body as string)).toEqual({
+      provider: "anthropic",
+      upstreamUrl: "https://api.anthropic.com",
+      apiStyle: "anthropic",
+    });
+  });
+});

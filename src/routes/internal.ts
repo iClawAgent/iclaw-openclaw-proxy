@@ -126,6 +126,29 @@ async function runSkillsAdminAction(action: SkillsAdminActionPayload): Promise<u
   throw new Error("unsupported_skills_admin_action");
 }
 
+async function runSidecarAdminAction(action: SkillsAdminActionPayload): Promise<unknown> {
+  const method = action.method.toUpperCase();
+  const path = action.path;
+  if (!path.startsWith("/admin/")) {
+    throw new Error("unsupported_sidecar_admin_action");
+  }
+
+  const res = await fetch(`http://127.0.0.1:${Number(process.env.PORT ?? "8080")}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Admin-Token": process.env.SIDECAR_ADMIN_TOKEN ?? "",
+    },
+    body: method !== "GET" && method !== "HEAD" && action.payload !== null
+      ? JSON.stringify(action.payload)
+      : undefined,
+  });
+  if (!res.ok) {
+    throw new Error(`sidecar_admin_action_failed:${res.status}:${await res.text()}`);
+  }
+  return res.json().catch(() => ({}));
+}
+
 function logFailedGogResult(context: string, result: unknown): void {
   if (!result || typeof result !== "object") return;
   const body = result as {
@@ -172,6 +195,35 @@ internalRouter.post("/internal/skills/admin-action-by-token", async (c) => {
     return c.json(result);
   } catch (err) {
     const code = err instanceof Error ? err.message : "skills_admin_action_failed";
+    return c.json({ error: code }, 502);
+  }
+});
+
+internalRouter.post("/internal/admin-action-by-token", async (c) => {
+  const body = await c.req.json<SkillsAdminActionTokenBody>();
+  if (!body.token || !body.instanceId || !body.tokenCallbackBaseUrl) {
+    return c.json({ error: "token, instanceId, and tokenCallbackBaseUrl are required" }, 400);
+  }
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "token_callback_url_not_configured" }, 503);
+  }
+  if (body.tokenCallbackBaseUrl !== process.env.TOKEN_CALLBACK_BASE_URL) {
+    return c.json({ error: "invalid_token_callback_url" }, 403);
+  }
+
+  let action;
+  try {
+    action = await fetchSkillsAdminAction(body);
+  } catch {
+    return c.json({ error: "token_exchange_failed" }, 502);
+  }
+  if (!action) return c.json({ error: "token_exchange_failed" }, 401);
+
+  try {
+    const result = await runSidecarAdminAction(action);
+    return c.json(result);
+  } catch (err) {
+    const code = err instanceof Error ? err.message : "sidecar_admin_action_failed";
     return c.json({ error: code }, 502);
   }
 });
