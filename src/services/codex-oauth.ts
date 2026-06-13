@@ -10,6 +10,12 @@ const AUTH_PROFILES_PATH = path.join(
   "agents/main/agent/auth-profiles.json",
 );
 
+// OpenClaw 2026.6.x merged Codex OAuth into the canonical `openai` provider.
+// The ChatGPT/Codex OAuth credential lives under the `openai:default` profile
+// (legacy installs used `openai-codex:default`, migrated by `openclaw doctor`).
+const CODEX_OAUTH_PROFILE_KEY = "openai:default";
+const LEGACY_CODEX_PROFILE_PREFIX = "openai-codex:";
+
 const REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
 export interface CodexOAuthStatus {
@@ -147,8 +153,10 @@ function readAuthProfilesFile(): AuthProfilesFile {
 
 /**
  * Write an OpenAI Codex OAuth profile into OpenClaw's auth-profiles.json.
- * OpenClaw's openai-codex provider is built-in; it reads this profile for
- * native OAuth routing + automatic token refresh.
+ * OpenClaw 2026.6.x reads the ChatGPT/Codex OAuth credential from the
+ * canonical `openai:default` profile (it is paired with an
+ * `openai/<model>` + `agentRuntime.id: "codex"` agent config) and refreshes
+ * the token automatically.
  *
  * Field names per OpenClaw docs: access, refresh, expires (ms), accountId.
  */
@@ -162,8 +170,8 @@ export function writeAuthProfiles(
 
   const file = readAuthProfilesFile();
 
-  file.profiles["openai-codex:default"] = {
-    provider: "openai-codex",
+  file.profiles[CODEX_OAUTH_PROFILE_KEY] = {
+    provider: "openai",
     type: "oauth",
     access: accessToken,
     refresh: refreshToken,
@@ -173,24 +181,31 @@ export function writeAuthProfiles(
 
   writeJsonFile(AUTH_PROFILES_PATH, file);
   console.log(
-    `[codex-oauth] Wrote auth-profiles.json profile openai-codex:default`,
+    `[codex-oauth] Wrote auth-profiles.json profile ${CODEX_OAUTH_PROFILE_KEY}`,
   );
 }
 
 /**
- * Remove all openai-codex profiles from auth-profiles.json.
+ * Remove the Codex OAuth profile from auth-profiles.json. Clears the canonical
+ * `openai:default` OAuth profile plus any legacy `openai-codex:*` profiles from
+ * pre-2026.6.x installs. A BYOK `openai` API-key profile (type "api_key") is
+ * left intact — only the OAuth credential is removed.
  */
 export function clearAuthProfiles(): void {
   if (!fs.existsSync(AUTH_PROFILES_PATH)) return;
   try {
     const file = readAuthProfilesFile();
     for (const key of Object.keys(file.profiles)) {
-      if (key.startsWith("openai-codex:")) {
+      const isLegacyCodex = key.startsWith(LEGACY_CODEX_PROFILE_PREFIX);
+      const isCanonicalCodex =
+        key === CODEX_OAUTH_PROFILE_KEY &&
+        file.profiles[key]?.type === "oauth";
+      if (isLegacyCodex || isCanonicalCodex) {
         delete file.profiles[key];
       }
     }
     writeJsonFile(AUTH_PROFILES_PATH, file);
-    console.log("[codex-oauth] Cleared openai-codex profiles from auth-profiles.json");
+    console.log("[codex-oauth] Cleared Codex OAuth profile from auth-profiles.json");
   } catch {
     try {
       fs.unlinkSync(AUTH_PROFILES_PATH);
@@ -217,7 +232,27 @@ function writeJsonFile(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
-export const CODEX_OAUTH_DEFAULT_MODEL = "openai-codex/gpt-5.4";
+// OpenClaw 2026.6.x retired the `openai-codex/*` namespace (legacy refs fail at
+// runtime with "Unknown model"). Codex OAuth now uses a canonical
+// `openai/<model>` ref. Keep in sync with @iclawagent/shared
+// OPENCLAW_DEFAULTS.codexOAuthDefaultModel.
+export const CODEX_OAUTH_DEFAULT_MODEL = "openai/gpt-5.4";
+
+/**
+ * Build the OpenClaw `agents.defaults` fragment for Codex OAuth.
+ * Mirrors @iclawagent/shared `buildCodexOAuthAgentsDefaults` — the sidecar is an
+ * isolated submodule and cannot import the shared package, so this is kept in
+ * sync manually. The per-model `agentRuntime.id: "codex"` binding routes the
+ * turn through OpenClaw's native Codex app-server harness.
+ */
+export function buildCodexOAuthAgentsDefaults(
+  model: string = CODEX_OAUTH_DEFAULT_MODEL,
+): { model: string; models: Record<string, { agentRuntime: { id: string } }> } {
+  return {
+    model,
+    models: { [model]: { agentRuntime: { id: "codex" } } },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Token refresh (Sidecar-local, kept for backward compat / status reporting)
