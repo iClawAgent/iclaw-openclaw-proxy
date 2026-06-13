@@ -27,7 +27,7 @@ import {
   clearTokens,
   writeAuthProfiles,
   clearAuthProfiles,
-  CODEX_OAUTH_DEFAULT_MODEL,
+  buildCodexOAuthAgentsDefaults,
   withCodexOAuthTransition,
 } from "../services/codex-oauth.js";
 import {
@@ -308,9 +308,11 @@ adminRouter.post("/admin/skills/dep-install", async (c) => {
 // ---------------------------------------------------------------------------
 
 /**
- * Activate Codex OAuth: write auth-profiles.json for openai-codex provider,
- * set default model to openai-codex/gpt-5.4, then reload gateway config.
- * The openai provider stays on sidecar proxy (for API Key mode fallback).
+ * Activate Codex OAuth: write the `openai:default` OAuth profile, set the
+ * default agent to the canonical `openai/<model>` Codex ref + per-model
+ * `agentRuntime.id: "codex"` binding, then reload gateway config. The openai
+ * provider stays on sidecar proxy (for API Key mode fallback); the codex
+ * runtime binding overrides transport for the Codex model.
  */
 adminRouter.post("/admin/activate-codex-oauth", async (c) => {
   const { accessToken, refreshToken, expiresIn } = await c.req.json<{
@@ -335,7 +337,7 @@ adminRouter.post("/admin/activate-codex-oauth", async (c) => {
     // 2) Attempt the Gateway config patch. If this fails, retryable state is
     //    preserved but we surface a non-2xx so the caller can re-drive.
     const modelPatch = JSON.stringify({
-      agents: { defaults: { model: CODEX_OAUTH_DEFAULT_MODEL } },
+      agents: { defaults: buildCodexOAuthAgentsDefaults() },
     });
     try {
       await relayConfigPatch(modelPatch);
@@ -354,9 +356,10 @@ adminRouter.post("/admin/activate-codex-oauth", async (c) => {
 });
 
 /**
- * Deactivate Codex OAuth: clear openai-codex auth profiles, restore default
- * model, then reload gateway config. The openai provider is untouched
- * (it was never modified — always on sidecar proxy).
+ * Deactivate Codex OAuth: clear the Codex OAuth profile (canonical
+ * `openai:default` OAuth credential + any legacy `openai-codex:*`), restore the
+ * default model, then reload gateway config. A BYOK `openai` API-key profile is
+ * left intact, and the openai provider stays on sidecar proxy.
  */
 adminRouter.post("/admin/deactivate-codex-oauth", async (c) => {
   const body = await c.req.json<{ restoreModel?: string }>().catch(() => ({} as { restoreModel?: string }));
