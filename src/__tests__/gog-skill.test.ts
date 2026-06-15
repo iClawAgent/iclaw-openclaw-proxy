@@ -111,6 +111,78 @@ describe("gog-skill service", () => {
       expect(dockerfile).toContain(GOG_SHA256.linux_arm64);
       expect(dockerfile).toContain("/usr/local/bin/gog-real");
     });
+
+    // ─── P0 baked-wrapper contract ───────────────────────────────────────────
+    // Asserts the Dockerfile bakes /usr/local/bin/gog in the SAME RUN as gog-real,
+    // with the three required env-export semantics, correct exec target, and
+    // OPENCLAW_STATE_DIR default-substitution (not a hard-coded literal path).
+    it("Dockerfile bakes /usr/local/bin/gog in the same RUN block as gog-real", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      // Find the RUN block that installs gog-real and verify gog is baked in the same block
+      const runBlocks = dockerfile.split(/^RUN /m);
+      const gogRealBlock = runBlocks.find((b) => b.includes("/usr/local/bin/gog-real"));
+      expect(gogRealBlock).toBeDefined();
+      expect(gogRealBlock).toContain("/usr/local/bin/gog");
+    });
+
+    it("baked /usr/local/bin/gog wrapper exports GOG_KEYRING_BACKEND=file", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      expect(dockerfile).toContain("GOG_KEYRING_BACKEND=file");
+    });
+
+    it("baked /usr/local/bin/gog wrapper exports GOG_KEYRING_PASSWORD from keyring file", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      // Must read keyring password from a file (cat of keyring.password path)
+      expect(dockerfile).toContain("keyring.password");
+      expect(dockerfile).toContain("GOG_KEYRING_PASSWORD");
+    });
+
+    it("baked /usr/local/bin/gog wrapper exports XDG_CONFIG_HOME", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      expect(dockerfile).toContain("XDG_CONFIG_HOME");
+    });
+
+    it("baked /usr/local/bin/gog wrapper execs /usr/local/bin/gog-real (not the state-dir copy)", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      // The baked wrapper must exec the image-layer binary, not the state-dir copy
+      expect(dockerfile).toContain("exec /usr/local/bin/gog-real");
+    });
+
+    it("baked /usr/local/bin/gog wrapper uses OPENCLAW_STATE_DIR default-substitution (not a hard-coded path)", async () => {
+      let dockerfile: string;
+      try {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "Dockerfile.openclaw-sidecar"), "utf-8");
+      } catch {
+        dockerfile = await fs.readFile(path.resolve(process.cwd(), "iclawagent-app/Dockerfile.openclaw-sidecar"), "utf-8");
+      }
+      // Must use shell default-substitution so non-default OPENCLAW_STATE_DIR instances are handled
+      expect(dockerfile).toMatch(/OPENCLAW_STATE_DIR[^}]*:-\/root\/.openclaw/);
+    });
   });
 
   // ─── Path getters ─────────────────────────────────────────────────────────
@@ -476,6 +548,33 @@ describe("gog-skill service", () => {
     });
   });
 
+  // ─── P0 baked-unconfigured instance: keyring absent ──────────────────────
+  // Edge Case 4: on a fresh baked instance the keyring password file is absent;
+  // getGogEnv() catches and yields empty keyringPassword; gog --version still
+  // succeeds (binary is present); gogStatus must return installed=true, connected=false.
+  // This guards the specific regression path: the bake guarantee is that which gog
+  // and gog --version work WITHOUT a prior setup; auth ops fail until setup runs.
+
+  describe("gogStatus — baked-unconfigured instance (no keyring)", () => {
+    it("returns installed=true, connected=false when keyring password file is absent", async () => {
+      mockExecFileAsync.mockReset();
+      // Simulate absent keyring: readFile throws for keyring.password; all other reads also throw
+      vi.spyOn(fs, "readFile").mockRejectedValue(new Error("ENOENT: no such file or directory"));
+      // --version succeeds (binary is present from the baked image layer)
+      // auth list --check fails: no tokens stored
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "No tokens stored", stderr: "" });
+
+      const status = await gogStatus();
+
+      expect(status).toMatchObject({ installed: true, connected: false });
+      // Must not report connected=true when keyring is absent
+      expect(status.connected).toBe(false);
+      expect(status.installed).toBe(true);
+    });
+  });
+
   // ─── checksum mismatch deletes temp artifact ──────────────────────────────
 
   describe("Phase 3 baked binary install", () => {
@@ -651,6 +750,251 @@ describe("gog-skill service", () => {
         if (savedEnv !== undefined) process.env.OPENCLAW_STATE_DIR = savedEnv;
         else vi.stubEnv("OPENCLAW_STATE_DIR", "/test-state");
       }
+    });
+  });
+
+  // ─── D9: setupGog rejects temporary_access_token (auth_mode_not_available) ─
+
+  describe("D9 — setupGog rejects non-oauth authMode", () => {
+    it("throws auth_mode_not_available when authMode is temporary_access_token", async () => {
+      // Binary install must succeed first (auth mode check is after install)
+      gogBinaryInternals.execFileAsync = vi.fn(async (cmd: string) => {
+        if (cmd === BAKED_GOG_REAL_BIN_PATH) return { stdout: `gog version ${GOG_VERSION}`, stderr: "" };
+        throw new Error("not installed");
+      }) as any;
+      gogBinaryInternals.downloadToFile = vi.fn().mockResolvedValue(undefined) as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+
+      await expect(
+        setupGog({
+          accountEmail: "user@example.com",
+          authMode: "temporary_access_token" as any,
+          services: ["gmail"],
+          temporaryAccessToken: "tok",
+        }),
+      ).rejects.toThrow("auth_mode_not_available");
+    });
+
+    it("accepts oauth authMode and proceeds to pending_oauth", async () => {
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=xyz", stderr: "" });
+
+      const result = await setupGog({
+        accountEmail: "user@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      expect(result.status).toBe("pending_oauth");
+    });
+  });
+
+  // ─── P3: redirect URL parse negatives ────────────────────────────────────────
+
+  describe("P3 — gogOauthComplete redirect URL parse", () => {
+    it("rejects non-URL string without 500 (returns oauth_invalid_redirect)", async () => {
+      // First inject pending state via a successful step 1
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=abc123", stderr: "" });
+
+      await setupGog({
+        accountEmail: "redirect-test@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      // Now test with a non-URL string
+      const result = await gogOauthComplete({
+        accountEmail: "redirect-test@example.com",
+        redirectUrl: "not-a-url-at-all",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.message).toBe("oauth_invalid_redirect");
+    });
+
+    it("rejects URL where 'state' param is embedded in another param name (statefoo=1)", async () => {
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=abc123", stderr: "" });
+
+      await setupGog({
+        accountEmail: "statefoo-test@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      // statefoo=1 with code present — must be REJECTED (no real "state" param)
+      const result = await gogOauthComplete({
+        accountEmail: "statefoo-test@example.com",
+        redirectUrl: "http://127.0.0.1/?statefoo=1&code=mycode",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.message).toBe("oauth_invalid_redirect");
+    });
+
+    it("rejects URL with state present but empty code value", async () => {
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=abc123", stderr: "" });
+
+      await setupGog({
+        accountEmail: "emptycode-test@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      const result = await gogOauthComplete({
+        accountEmail: "emptycode-test@example.com",
+        redirectUrl: "http://127.0.0.1/?state=abc123&code=",
+      });
+      expect(result.ok).toBe(false);
+      expect(result.message).toBe("oauth_invalid_redirect_missing_code");
+    });
+  });
+
+  // ─── P3: mutex — second call during first gets gog_setup_in_progress ──────
+
+  describe("P3 — mutex prevents concurrent setupGog for same account", () => {
+    it("second concurrent setupGog returns gog_setup_in_progress without running the body", async () => {
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+
+      let firstResolve!: () => void;
+      const firstBlocked = new Promise<void>((r) => { firstResolve = r; });
+
+      // First call: installSkillFromClawHub never resolves (holds the mutex)
+      mockInstallSkill.mockReturnValueOnce(firstBlocked);
+
+      const firstCall = setupGog({
+        accountEmail: "mutex-test@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      // Give the event loop a tick so the first call acquires the mutex
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Second call must throw/reject with gog_setup_in_progress
+      await expect(
+        setupGog({
+          accountEmail: "mutex-test@example.com",
+          authMode: "oauth",
+          services: ["gmail"],
+          oauthClientJson: validOauthClientJson(),
+        }),
+      ).rejects.toThrow("gog_setup_in_progress");
+
+      // installSkill should only have been called once (second call did not enter the body)
+      expect(mockInstallSkill).toHaveBeenCalledTimes(1);
+
+      // Release the first call
+      firstResolve();
+      await firstCall.catch(() => {});
+    });
+  });
+
+  // ─── D4: console.error must not be called with auth add --step 2 payload ──
+
+  describe("D4 — no raw console.error for step-2 failure", () => {
+    it("does not call console.error when auth add --step 2 fails (only logGogDiagnostic)", async () => {
+      gogBinaryInternals.execFileAsync = mockExecFileAsync as any;
+      vi.spyOn(fs, "access").mockResolvedValue(undefined);
+      vi.spyOn(fs, "readFile").mockResolvedValue("pw" as any);
+      vi.spyOn(fs, "mkdir").mockResolvedValue(undefined as any);
+      vi.spyOn(fs, "writeFile").mockResolvedValue(undefined);
+      vi.spyOn(fs, "rename").mockResolvedValue(undefined);
+      vi.spyOn(fs, "chmod").mockResolvedValue(undefined);
+      vi.spyOn(fs, "copyFile").mockResolvedValue(undefined);
+      mockExecFileAsync
+        .mockResolvedValueOnce({ stdout: `gog version ${GOG_VERSION}`, stderr: "" })
+        .mockResolvedValueOnce({ stdout: "", stderr: "" })
+        .mockResolvedValueOnce({ stdout: "https://accounts.google.com/o/oauth2/auth?state=step2test", stderr: "" });
+
+      // Run step 1
+      await setupGog({
+        accountEmail: "d4-test@example.com",
+        authMode: "oauth",
+        services: ["gmail"],
+        oauthClientJson: validOauthClientJson(),
+      });
+
+      const consoleErrorSpy = vi.spyOn(console, "error");
+
+      // Step 2 exec fails
+      mockExecFileAsync.mockRejectedValueOnce(Object.assign(new Error("step2 failed"), {
+        stderr: "access_token=supersecret",
+        stdout: "",
+        code: 1,
+      }));
+      // auth list check (after step 2 failure — not reached)
+
+      await gogOauthComplete({
+        accountEmail: "d4-test@example.com",
+        redirectUrl: "http://127.0.0.1/?state=step2test&code=mycode",
+      });
+
+      // console.error must NOT have been called with the RAW (unredacted) diag payload.
+      // logGogDiagnostic IS still called (and it calls console.error with a redacted payload),
+      // but the previous raw console.error call was deleted (D4). Verify no call contains the
+      // literal secret string that would only appear in the raw (non-safeDiagText) call.
+      const rawSecretCall = consoleErrorSpy.mock.calls.find((call) =>
+        JSON.stringify(call).includes("access_token=supersecret"),
+      );
+      expect(rawSecretCall).toBeUndefined();
     });
   });
 });

@@ -57,6 +57,15 @@ export function validateEnv(): void {
     bootApiKey = getEnvOrThrow("LLM_API_KEY");
   }
 
+  // NON-FATAL gog-only: warn if TOKEN_CALLBACK_BASE_URL is absent. This var is needed only
+  // for the GOG OAuth token-exchange relay. Do NOT use getEnvOrThrow here — a missing var
+  // must never abort the sidecar boot, as that would break the Telegram webhook relay and
+  // LLM proxy for ALL non-gog instances (INC-2026-03-23 / INC-2026-04-11 class).
+  // Placement is SAFETY-CRITICAL: placed AFTER the getEnvOrThrow credential sequence above.
+  if (!process.env.TOKEN_CALLBACK_BASE_URL) {
+    console.warn("[sidecar] TOKEN_CALLBACK_BASE_URL is not set — GOG OAuth token exchange will fail if GOG setup is attempted");
+  }
+
   // Seed the active provider into the keyring from boot env.
   const bootApiStyle: "openai" | "anthropic" | "google-generative-ai" =
     activeProvider === "anthropic" ? "anthropic"

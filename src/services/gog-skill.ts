@@ -11,18 +11,25 @@ import { STATE_DIR as _MODULE_STATE_DIR } from "../lib/state-dir.js";
 // Local types — sidecar is a git submodule and MUST NOT import from @iclawagent/shared.
 // Keep in sync with packages/shared/src/types.ts Gog* types manually.
 
-// Gog skill: "temporary_access_token" active. "service_account" remains out of scope.
-export type GogAuthMode = "oauth" | "temporary_access_token";
+// Gog skill: "temporary_access_token" is rejected at the accepted-input boundary (D9).
+// Response/connection-facing unions stay permissive so legacy persisted rows never lie on the wire.
+// "service_account" remains out of scope.
+export type GogAuthMode = "oauth";
+// Wide type used only at the request boundary so an old client sending temporary_access_token
+// gets a clean runtime rejection (auth_mode_not_available) without a TS2367 no-overlap error.
+type GogAuthModeRequest = GogAuthMode | string;
 export type GogService = "gmail" | "calendar" | "drive" | "contacts" | "docs" | "sheets";
 
 const DEFAULT_SERVICES: GogService[] = ["gmail", "calendar", "drive", "contacts", "sheets", "docs"];
 
 export interface GogSetupRequest {
   accountEmail: string;
-  authMode: GogAuthMode;
+  // Wide at the boundary so old clients get auth_mode_not_available, not a TS2367 no-overlap error.
+  authMode: GogAuthModeRequest;
   services: GogService[];
   oauthClientJson?: unknown;
   serviceAccountJson?: unknown;
+  // Vestigial: temporaryAccessToken is rejected at setup; kept for API compat so old clients can send it.
   temporaryAccessToken?: string;
 }
 
@@ -37,7 +44,8 @@ export interface GogSetupResponse {
   ok: boolean;
   status: "pending_oauth" | "connected" | "failed" | "needs_image_upgrade";
   accountEmail?: string;
-  authMode: GogAuthMode;
+  // Permissive (D13/Option B): legacy persisted rows may carry temporary_access_token on the wire.
+  authMode: GogAuthMode | string;
   message?: string;
   authorizationUrl?: string;
   expiresAt?: string;
@@ -48,7 +56,8 @@ export interface GogStatusResponse {
   installed: boolean;
   connected: boolean;
   accountEmail?: string;
-  authMode?: GogAuthMode;
+  // Permissive (D13/Option B): legacy persisted rows may carry temporary_access_token on the wire.
+  authMode?: GogAuthMode | string;
   temporary?: boolean;
   lastVerifiedAt?: string;
   missing?: {
@@ -120,8 +129,6 @@ const OAUTH_REMOTE_TTL_MS = parseInt(
   10,
 ) * 1000;
 
-const MUTEX_TIMEOUT_MS = 30_000;
-
 const execFileAsync = promisify(execFile);
 
 // ─── Pending OAuth State (in-memory, per account) ─────────────────────────────
@@ -150,15 +157,14 @@ async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const lock = new Promise<void>((r) => { resolve = r; });
   mutexes.set(key, lock);
 
-  const timeout = setTimeout(() => {
-    mutexes.delete(key);
-    resolve();
-  }, MUTEX_TIMEOUT_MS);
-
+  // No auto-release timer: the lock is held for the FULL fn() duration (bounded by per-exec
+  // execFileAsync timeouts 15–30 s and the orchestrator 120 s relay timeout). The 30 s
+  // auto-release timer was removed because it broke mutual exclusion — it released the lock
+  // while fn() was still running, allowing a concurrent setupGog to start a second
+  // install/credential-write against the same instance (P3 correctness fix).
   try {
     return await fn();
   } finally {
-    clearTimeout(timeout);
     mutexes.delete(key);
     resolve();
   }
@@ -220,11 +226,6 @@ export function getGogProfileDir(accountEmail: string): string {
 /** Per-account service-account key path */
 export function getGogServiceAccountPath(accountEmail: string): string {
   return path.posix.join(getStateDir(), `.iclaw/gog/service-accounts/${accountEmail}.json`);
-}
-
-/** Per-account temp token path */
-export function getGogTempPath(accountEmail: string): string {
-  return path.posix.join(getStateDir(), `.iclaw/gog/temp/${accountEmail}.token`);
 }
 
 // ─── Env Builder ──────────────────────────────────────────────────────────────
@@ -476,16 +477,6 @@ async function writeOauthClientJson(accountEmail: string, clientJson: unknown): 
   return clientPath;
 }
 
-async function writeTempToken(accountEmail: string, token: string): Promise<void> {
-  const tempDir = path.posix.join(getStateDir(), ".iclaw/gog/temp");
-  await fs.mkdir(tempDir, { recursive: true, mode: 0o700 });
-  const tokenPath = getGogTempPath(accountEmail);
-  const tmpPath = `${tokenPath}.tmp`;
-  await fs.writeFile(tmpPath, token, { mode: 0o600 });
-  await fs.rename(tmpPath, tokenPath);
-  await fs.chmod(tokenPath, 0o600);
-}
-
 // ─── OAuth Client JSON Validation ────────────────────────────────────────────
 
 export function validateOauthClientJson(clientJson: unknown): void {
@@ -626,17 +617,18 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
       throw err;
     }
 
-    // Step 3: Write credential files
-    if (req.authMode === "oauth") {
-      validateOauthClientJson(req.oauthClientJson);
-      await writeOauthClientJson(req.accountEmail, req.oauthClientJson);
-    } else if (req.authMode === "temporary_access_token") {
-      if (!req.temporaryAccessToken) throw new Error("temporaryAccessToken is required");
-      await writeTempToken(req.accountEmail, req.temporaryAccessToken);
+    // Step 3: Reject non-oauth modes (D9). Guard at string boundary so old clients sending
+    // temporary_access_token get auth_mode_not_available without a TS2367 no-overlap error.
+    if (req.authMode !== "oauth") {
+      throw new Error("auth_mode_not_available");
     }
 
-    // Step 4: For OAuth mode — run step 1 and return pending_oauth
-    if (req.authMode === "oauth") {
+    // Step 3b: Write OAuth credential files
+    validateOauthClientJson(req.oauthClientJson);
+    await writeOauthClientJson(req.accountEmail, req.oauthClientJson);
+
+    // Step 4: OAuth mode only — run step 1 and return pending_oauth
+    {
       const clientPath = path.posix.join(getGogCredentialDir(req.accountEmail), "client.json");
       const gogEnv = await getGogEnv();
       const realBin = getGogRealBinPath();
@@ -685,71 +677,6 @@ export async function setupGog(req: GogSetupRequest): Promise<GogSetupResponse> 
         events,
       };
     }
-
-    // Step 5: Call updateSkill with non-secret env
-    await updateSkill({
-      skillKey: GOG_CLAWHUB_SLUG,
-      enabled: true,
-      env: buildUpdateSkillEnv(req.accountEmail),
-    });
-    events.push({ action: "gog_skill_enabled", status: "success" });
-
-    // Step 6: For non-OAuth modes, verify auth
-    const gogEnv = await getGogEnv();
-    const realBin = getGogRealBinPath();
-    try {
-      const { stdout, stderr } = await execFileAsync(realBin, ["auth", "list", "--check", "--no-input"], {
-        env: gogEnv,
-        timeout: 15_000,
-      });
-      if (!authListShowsStoredCredentials(stdout, stderr)) {
-        events.push({
-          action: "gog_auth_check_failed",
-          status: "failed",
-          errorCode: "gog_tokens_missing",
-        });
-        return {
-          ok: false,
-          status: "failed",
-          accountEmail: req.accountEmail,
-          authMode: req.authMode,
-          message: "gog_tokens_missing",
-          events,
-        };
-      }
-    } catch {
-      let doctorSummary: string | undefined;
-      let doctorErrorCode: string | undefined;
-      try {
-        const { summary, errorCode } = await runAuthDoctor(gogEnv);
-        doctorSummary = summary || undefined;
-        doctorErrorCode = errorCode;
-      } catch {
-        // best-effort
-      }
-      events.push({
-        action: "gog_auth_check_failed",
-        status: "failed",
-        message: doctorSummary,
-        errorCode: doctorErrorCode,
-      });
-      return {
-        ok: false,
-        status: "failed",
-        accountEmail: req.accountEmail,
-        authMode: req.authMode,
-        message: doctorErrorCode ?? "gog_auth_check_failed",
-        events,
-      };
-    }
-
-    return {
-      ok: true,
-      status: "connected",
-      accountEmail: req.accountEmail,
-      authMode: req.authMode,
-      events,
-    };
   });
 }
 
@@ -818,11 +745,21 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
       return { ok: false, status: "failed", message: "oauth_state_expired", events };
     }
 
-    if (!req.redirectUrl || !req.redirectUrl.includes("state")) {
+    // P3: Parse via URL/URLSearchParams so loose substring checks cannot be fooled
+    // (e.g. "statefoo=1" would match the old includes("state") check). Preserve existing
+    // error codes so the relay/UI mapping is unchanged.
+    let parsedParams: URLSearchParams;
+    try {
+      parsedParams = new URL(req.redirectUrl).searchParams;
+    } catch {
       events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect" });
       return { ok: false, status: "failed", message: "oauth_invalid_redirect", events };
     }
-    if (!req.redirectUrl.includes("code=")) {
+    if (!parsedParams.get("state")) {
+      events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect" });
+      return { ok: false, status: "failed", message: "oauth_invalid_redirect", events };
+    }
+    if (!parsedParams.get("code")) {
       events.push({ action: "gog_oauth_expired", status: "failed", errorCode: "oauth_invalid_redirect_missing_code" });
       return { ok: false, status: "failed", message: "oauth_invalid_redirect_missing_code", events };
     }
@@ -849,7 +786,6 @@ export async function gogOauthComplete(req: GogOauthCompleteRequest): Promise<Go
         stderr: execErr?.stderr,
         stdout: execErr?.stdout,
       };
-      console.error("[gog] auth add --step 2 failed", diagPayload);
       logGogDiagnostic("auth add --step 2 failed", diagPayload);
       const detail = safeDiagText(execErr?.stderr ?? execErr?.stdout, 200);
       events.push({ action: "gog_auth_check_failed", status: "failed", message: detail, errorCode: "oauth_step2_failed" });
@@ -1021,13 +957,11 @@ export async function gogDisconnect(accountEmail: string): Promise<GogDisconnect
     const credDir = getGogCredentialDir(accountEmail);
     const profileDir = getGogProfileDir(accountEmail);
     const serviceAccountPath = getGogServiceAccountPath(accountEmail);
-    const tempPath = getGogTempPath(accountEmail);
     const envPath = path.posix.join(getStateDir(), `.iclaw/gog/env/${accountEmail}.env`);
 
     await fs.rm(credDir, { recursive: true, force: true });
     await fs.rm(profileDir, { recursive: true, force: true });
     await fs.rm(serviceAccountPath, { force: true }).catch(() => {});
-    await fs.rm(tempPath, { force: true }).catch(() => {});
     await fs.rm(envPath, { force: true }).catch(() => {});
 
     // Remove pending OAuth state if any
