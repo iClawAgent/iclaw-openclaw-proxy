@@ -251,17 +251,13 @@ export async function writeSkillFile(
 }
 
 export async function restartGateway(): Promise<WorkspaceGatewayRestartResponse> {
-  const raw = execFileSync("pgrep", ["-x", "openclaw-gatewa"], {
-    encoding: "utf-8",
-  }).trim();
-
-  const pids = raw.split("\n").filter(Boolean);
+  const pids = findGatewayPids();
   if (pids.length === 0) {
     throw new Error("gateway_not_found: no gateway process running");
   }
 
   for (const pid of pids) {
-    process.kill(parseInt(pid, 10), "SIGUSR1");
+    process.kill(pid, "SIGUSR1");
   }
 
   return { ok: true, method: "sigusr1" };
@@ -308,17 +304,38 @@ export async function writeOpenclawConfig(
 // Gateway Process Status
 // ---------------------------------------------------------------------------
 
-export function getGatewayStatus(): GatewayStatusResponse {
-  try {
-    const raw = execFileSync("pgrep", ["-x", "openclaw-gatewa"], {
-      encoding: "utf-8",
-    }).trim();
-    const pids = raw
-      .split("\n")
-      .filter(Boolean)
-      .map((p) => parseInt(p, 10));
-    return { running: pids.length > 0, pids };
-  } catch {
-    return { running: false, pids: [] };
+// Process names (comm, capped at 15 chars by the kernel) the OpenClaw gateway
+// worker may run under. Current images report `openclaw`; older images reported
+// `openclaw-gateway`, truncated to `openclaw-gatewa`. Matching both keeps
+// detection correct across an OpenClaw upgrade instead of silently reporting the
+// gateway as stopped when only the process name changed.
+const GATEWAY_PROCESS_NAMES = ["openclaw", "openclaw-gatewa"];
+
+/**
+ * Resolve the PIDs of the running OpenClaw gateway worker(s) by exact process
+ * name across every name the gateway is known to use. Returns an empty array
+ * when none are running. Shared by getGatewayStatus() (report) and
+ * restartGateway() (SIGUSR1) so both survive a process-name change identically.
+ */
+function findGatewayPids(): number[] {
+  const pids = new Set<number>();
+  for (const name of GATEWAY_PROCESS_NAMES) {
+    try {
+      const raw = execFileSync("pgrep", ["-x", name], {
+        encoding: "utf-8",
+      }).trim();
+      for (const line of raw.split("\n").filter(Boolean)) {
+        const pid = parseInt(line, 10);
+        if (!Number.isNaN(pid)) pids.add(pid);
+      }
+    } catch {
+      // pgrep exits non-zero when no process matches — try the next name.
+    }
   }
+  return [...pids];
+}
+
+export function getGatewayStatus(): GatewayStatusResponse {
+  const pids = findGatewayPids();
+  return { running: pids.length > 0, pids };
 }

@@ -36,7 +36,11 @@ vi.mock("node:child_process", () => ({
 // Tests verify the behavior of the module as loaded. The default state dir is
 // /root/.openclaw (Phase 4: /data fallback removed).
 
-import { listWorkspaceFiles } from "../services/workspace-files.js";
+import {
+  listWorkspaceFiles,
+  getGatewayStatus,
+  restartGateway,
+} from "../services/workspace-files.js";
 
 // The default STATE_DIR when OPENCLAW_STATE_DIR is not set (Phase 4: native root)
 const DEFAULT_STATE_DIR = "/root/.openclaw";
@@ -93,6 +97,77 @@ describe("workspace-files — SKILLS_DIR derives from OPENCLAW_STATE_DIR", () =>
     mockReaddir.mockResolvedValue([]);
     const result = await listWorkspaceFiles();
     expect(result.workspaceDir).toBe(`${DEFAULT_STATE_DIR}/workspace`);
+  });
+});
+
+describe("getGatewayStatus — detects the gateway worker across process-name changes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reports running with the current `openclaw` process name", () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[1] === "openclaw") return "63\n";
+      throw Object.assign(new Error("no match"), { status: 1 });
+    });
+
+    expect(getGatewayStatus()).toEqual({ running: true, pids: [63] });
+  });
+
+  it("still matches the legacy truncated `openclaw-gatewa` name", () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[1] === "openclaw-gatewa") return "70\n";
+      throw Object.assign(new Error("no match"), { status: 1 });
+    });
+
+    expect(getGatewayStatus()).toEqual({ running: true, pids: [70] });
+  });
+
+  it("dedupes pids when both names resolve to the same process", () => {
+    mockExecFileSync.mockReturnValue("63\n");
+    expect(getGatewayStatus()).toEqual({ running: true, pids: [63] });
+  });
+
+  it("reports not running when pgrep finds nothing", () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw Object.assign(new Error("no match"), { status: 1 });
+    });
+
+    expect(getGatewayStatus()).toEqual({ running: false, pids: [] });
+  });
+});
+
+describe("restartGateway — signals the worker across process-name changes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("SIGUSR1s the gateway found under the current `openclaw` name", async () => {
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args[1] === "openclaw") return "63\n";
+      throw Object.assign(new Error("no match"), { status: 1 });
+    });
+    const killSpy = vi.spyOn(process, "kill").mockReturnValue(true);
+
+    await expect(restartGateway()).resolves.toEqual({
+      ok: true,
+      method: "sigusr1",
+    });
+    expect(killSpy).toHaveBeenCalledWith(63, "SIGUSR1");
+
+    killSpy.mockRestore();
+  });
+
+  it("throws gateway_not_found when no gateway process exists", async () => {
+    mockExecFileSync.mockImplementation(() => {
+      throw Object.assign(new Error("no match"), { status: 1 });
+    });
+    const killSpy = vi.spyOn(process, "kill").mockReturnValue(true);
+
+    await expect(restartGateway()).rejects.toThrow("gateway_not_found");
+    expect(killSpy).not.toHaveBeenCalled();
+
+    killSpy.mockRestore();
   });
 });
 
