@@ -137,10 +137,6 @@ export function setLlmProvider(
   console.log(`[sidecar] Provider set to: ${provider}`);
 }
 
-export function getCodexOAuthToken(): string | null {
-  return codexOAuthAccessToken;
-}
-
 export function setCodexOAuthAccessToken(token: string | null): void {
   codexOAuthAccessToken = token;
 }

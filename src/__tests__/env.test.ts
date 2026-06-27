@@ -73,3 +73,76 @@ describe("sidecar env validateEnv — D5 non-fatal TOKEN_CALLBACK_BASE_URL", () 
     process.env.SIDECAR_ADMIN_TOKEN = REQUIRED_ENV.SIDECAR_ADMIN_TOKEN;
   });
 });
+
+// ---------------------------------------------------------------------------
+// D1: expired persisted token on boot in codex_oauth mode → connected stays true
+// ---------------------------------------------------------------------------
+
+describe("sidecar env validateEnv — D1 expired token on boot", () => {
+  const CODEX_ENV = {
+    MEMBER_ID: "member-codex-123",
+    SIDECAR_ADMIN_TOKEN: "admin-token-codex",
+    LLM_AUTH_MODE: "codex_oauth",
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    for (const [k, v] of Object.entries(CODEX_ENV)) {
+      process.env[k] = v;
+    }
+    process.env.LLM_API_KEY = "";
+    delete process.env.TOKEN_CALLBACK_BASE_URL;
+  });
+
+  afterEach(() => {
+    for (const k of Object.keys(CODEX_ENV)) {
+      delete process.env[k];
+    }
+    delete process.env.LLM_API_KEY;
+    vi.restoreAllMocks();
+  });
+
+  it("reports connected:true when loadPersistedTokens returns an EXPIRED record (D1)", async () => {
+    // Override the top-level vi.mock with a version that returns an expired token.
+    // The sidecar no longer inspects expiresAt — it returns the record unconditionally.
+    vi.doMock("../services/codex-oauth.js", () => ({
+      loadPersistedTokens: () => ({
+        accessToken: "acc-expired",
+        refreshToken: "ref-expired",
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+    }));
+
+    const { validateEnv, getCodexOAuthStatus } = await import("../env.js");
+    expect(() => validateEnv()).not.toThrow();
+
+    const status = getCodexOAuthStatus();
+    expect(status.connected).toBe(true);
+    expect(status.authMode).toBe("codex_oauth");
+  });
+
+  it("arms no timer and makes no fetch to auth.openai.com on boot with expired token", async () => {
+    vi.doMock("../services/codex-oauth.js", () => ({
+      loadPersistedTokens: () => ({
+        accessToken: "acc-exp2",
+        refreshToken: "ref-exp2",
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
+    }));
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    vi.useFakeTimers();
+
+    const { validateEnv } = await import("../env.js");
+    validateEnv();
+
+    await vi.advanceTimersByTimeAsync(7_200_000);
+
+    const oauthCalls = fetchSpy.mock.calls.filter((c) =>
+      typeof c[0] === "string" && c[0].includes("auth.openai.com"),
+    );
+    expect(oauthCalls).toHaveLength(0);
+
+    vi.useRealTimers();
+  });
+});
