@@ -16,8 +16,6 @@ const AUTH_PROFILES_PATH = path.join(
 const CODEX_OAUTH_PROFILE_KEY = "openai:default";
 const LEGACY_CODEX_PROFILE_PREFIX = "openai-codex:";
 
-const REFRESH_BUFFER_MS = 5 * 60 * 1000;
-
 export interface CodexOAuthStatus {
   connected: boolean;
   authMode: string;
@@ -30,7 +28,6 @@ interface PersistedTokens {
   expiresAt: string;
 }
 
-let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let transitionQueue: Promise<void> = Promise.resolve();
 
 export function withCodexOAuthTransition<T>(
@@ -60,13 +57,10 @@ export function loadPersistedTokens(): PersistedTokens | null {
     const raw = fs.readFileSync(TOKEN_FILE, "utf-8");
     const data = JSON.parse(raw) as PersistedTokens;
     if (!data.accessToken || !data.refreshToken) return null;
-
-    if (new Date(data.expiresAt).getTime() < Date.now()) {
-      scheduleRefresh(data.refreshToken, 0);
-      return null;
-    }
-
-    scheduleRefreshFromExpiry(data.refreshToken, data.expiresAt);
+    // D1: return the persisted record even when expired. Token freshness is
+    // OpenClaw's responsibility (sole refresher via auth-profiles.json); the
+    // sidecar token is a liveness flag only. Returning null would mis-report a
+    // healthy instance as disconnected after a restart.
     return data;
   } catch {
     return null;
@@ -81,36 +75,18 @@ export function storeTokens(
   const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
   setCodexOAuthAccessToken(accessToken);
   persistTokens({ accessToken, refreshToken, expiresAt });
-  scheduleRefreshFromExpiry(refreshToken, expiresAt);
   console.log(`[codex-oauth] Tokens stored, expires at ${expiresAt}`);
 }
 
 export function clearTokens(): void {
   setCodexOAuthAccessToken(null);
   setLlmAuthMode("platform");
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-    refreshTimer = null;
-  }
   try {
     if (fs.existsSync(TOKEN_FILE)) fs.unlinkSync(TOKEN_FILE);
   } catch (err) {
     console.error("[codex-oauth] Failed to delete token file:", err);
   }
   console.log("[codex-oauth] Tokens cleared");
-}
-
-function scheduleRefreshFromExpiry(
-  refreshToken: string,
-  expiresAt: string,
-): void {
-  const delay = new Date(expiresAt).getTime() - Date.now() - REFRESH_BUFFER_MS;
-  scheduleRefresh(refreshToken, Math.max(delay, 0));
-}
-
-function scheduleRefresh(refreshToken: string, delayMs: number): void {
-  if (refreshTimer) clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => doRefresh(refreshToken), delayMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -254,43 +230,3 @@ export function buildCodexOAuthAgentsDefaults(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Token refresh (Sidecar-local, kept for backward compat / status reporting)
-// ---------------------------------------------------------------------------
-
-async function doRefresh(refreshToken: string): Promise<void> {
-  try {
-    const res = await fetch("https://auth.openai.com/oauth/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      }),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(
-        `[codex-oauth] Refresh failed: ${res.status} ${text}`,
-      );
-      clearTokens();
-      return;
-    }
-
-    const data = (await res.json()) as {
-      access_token: string;
-      refresh_token?: string;
-      expires_in: number;
-    };
-
-    const nextRefresh = data.refresh_token ?? refreshToken;
-    storeTokens(data.access_token, nextRefresh, data.expires_in);
-    writeAuthProfiles(data.access_token, nextRefresh, data.expires_in);
-    console.log("[codex-oauth] Token refreshed successfully");
-  } catch (err) {
-    console.error("[codex-oauth] Refresh error:", err);
-    scheduleRefresh(refreshToken, 60_000);
-  }
-}
