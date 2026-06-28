@@ -16,7 +16,8 @@
     "start": "bun run src/index.ts",
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:bun-db": "bun run src/__tests__/codex-oauth-bun-db.gate.ts"
   },
   "dependencies": {
     "hono": "^4.7.0"
